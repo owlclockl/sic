@@ -528,6 +528,57 @@ def _gameinfo_hints() -> list[str]:
     ]
 
 
+#: Сколько строк вывода компилятора показываем: начало, хвост и ключевые строки из середины.
+_EXCERPT_HEAD = 20
+_EXCERPT_TAIL = 15
+_EXCERPT_KEY = 20
+_ERROR_MARKERS = ("error", "fail", "unable", "can't", "cannot", "fatal", "exception", "warning", "ошиб")
+
+
+def _output_excerpt(output: str) -> list[str]:
+    """Выжимка из вывода компилятора, в которой не теряется начало.
+
+    Раньше брался только хвост (последние 25 строк). Но первые строки вывода
+    часто и есть причина: например, ошибка загрузки модуля компилятора. Поэтому
+    показываем начало, хвост и уникальные строки с признаками ошибки из середины.
+    """
+    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+    if len(lines) <= _EXCERPT_HEAD + _EXCERPT_TAIL + _EXCERPT_KEY:
+        return lines
+    middle = lines[_EXCERPT_HEAD:-_EXCERPT_TAIL]
+    key = [line for line in dict.fromkeys(middle) if any(m in line.lower() for m in _ERROR_MARKERS)]
+    key = key[:_EXCERPT_KEY]
+    return (
+        lines[:_EXCERPT_HEAD]
+        + [f"… пропущено {len(middle)} строк; строки с признаками ошибки из середины:"]
+        + key
+        + ["… конец вывода:"]
+        + lines[-_EXCERPT_TAIL:]
+    )
+
+
+def _csdk_damaged_hints() -> list[str]:
+    """Что делать, если компилятор не смог загрузить собственный модуль (error 126)."""
+    return [
+        "Причина похожа на сломанную установку CSDK: resourcecompiler не смог загрузить свой",
+        "модуль (modtools, «error 126» = не найдена DLL или её зависимость). Частые причины:",
+        " • CSDK распакован не полностью или архив повреждён;",
+        " • не хватает Microsoft Visual C++ Redistributable (x64) — одна из типичных причин 126;",
+        " • CSDK лежит в OneDrive/Desktop/Documents, где антивирус или синхронизация мешают.",
+        "",
+        "Что делать:",
+        " • переустановить CSDK в новый каталог вне OneDrive:",
+        r'     build.bat --csdk-install-dir "C:\DeadlockModding\Reduced_CSDK_12_new" --csdk-redownload',
+        " • установить VC++ Redistributable 2015–2022 (x64) и повторить сборку;",
+        " • журнал полностью: папка build\\compile_logs (см. ссылки ниже).",
+    ]
+
+
+def _is_csdk_damaged(text: str) -> bool:
+    lowered = text.lower()
+    return "unable to load module" in lowered or "error 126" in lowered
+
+
 def _compiler_failure_message(
     ctx: Context,
     relative: Path,
@@ -542,13 +593,66 @@ def _compiler_failure_message(
     ]
     output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
     if output:
-        lines += ["  вывод компилятора:", "\n".join(f"    {line}" for line in output.splitlines()[-25:])]
+        lines += ["  вывод компилятора (последняя попытка):", "\n".join(f"    {line}" for line in _output_excerpt(output))]
     if len(attempts) > 1:
         lines.append("  пробовал варианты: " + ", ".join(attempt.label for attempt in attempts))
+    for entry in _attempt_logs_for(ctx, relative):
+        lines.append(f"  журнал попытки «{entry['attempt']}» (код {entry['returncode']}): {entry['log']}")
     if _gameinfo_trouble(result):
         lines.append("")
         lines += [f"  {line}" if line else "" for line in _gameinfo_hints()]
+    if _is_csdk_damaged(output):
+        lines.append("")
+        lines += [f"  {line}" if line else "" for line in _csdk_damaged_hints()]
     return "\n".join(lines)
+
+
+def _attempt_logs_for(ctx: Context, relative: Path) -> list[dict]:
+    """Записи журнала по каждой попытке компиляции именно этого исходника."""
+    return [
+        entry for entry in ctx.state.get("compile_logs", [])
+        if entry.get("source") == relative.as_posix()
+    ]
+
+
+def _record_compile_attempt(
+    ctx: Context,
+    relative: Path,
+    attempt: "_CompileAttempt",
+    command: list[str],
+    result: "subprocess.CompletedProcess[str]",
+) -> None:
+    """Сохранить полный вывод попытки в ``build/compile_logs`` и запомнить выжимку.
+
+    Полный журнал нужен, потому что в отчёт и консоль попадает только выжимка.
+    Файлы лежат в build/ (он в .gitignore).
+    """
+    index = len(_attempt_logs_for(ctx, relative)) + 1
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", relative.as_posix())
+    path = ctx.build_dir / "compile_logs" / f"{slug}.{index}.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "\n".join([
+        f"# исходник: {relative.as_posix()}",
+        f"# вариант: {attempt.label}",
+        f"# команда: {shlex.join(command)}",
+        f"# код возврата: {result.returncode}",
+        "",
+        "## stdout",
+        result.stdout or "",
+        "",
+        "## stderr",
+        result.stderr or "",
+    ])
+    path.write_text(text, encoding="utf-8")
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    ctx.state.setdefault("compile_logs", []).append({
+        "source": relative.as_posix(),
+        "attempt": attempt.label,
+        "returncode": result.returncode,
+        "command": shlex.join(command),
+        "log": _rel(path, ctx.root),
+        "excerpt": _output_excerpt(output),
+    })
 
 
 def _stat_signature(path: Path) -> tuple[int, int] | None:
@@ -636,14 +740,18 @@ def step_compile(ctx: Context) -> None:
         result, command, used = _compile_one(ctx, source, relative, resolver, attempts)
         if result.returncode != 0:
             message = _compiler_failure_message(ctx, relative, result, command, attempts)
+            final_output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
             ctx.state["compile_error"] = {
                 "source": relative.as_posix(),
                 "returncode": result.returncode,
                 "command": shlex.join(command),
-                "stdout": (result.stdout or "")[-4000:],
-                "stderr": (result.stderr or "")[-4000:],
+                "output": _output_excerpt(final_output),
                 "attempts": [attempt.label for attempt in attempts],
-                "hints": _gameinfo_hints() if _gameinfo_trouble(result) else None,
+                "attempt_logs": _attempt_logs_for(ctx, relative),
+                "hints": (
+                    (_gameinfo_hints() if _gameinfo_trouble(result) else [])
+                    + (_csdk_damaged_hints() if _is_csdk_damaged(final_output) else [])
+                ) or None,
             }
             raise SystemExit(message)
         if used is not None and used.game is not None and not ctx.state.get("compiler_game"):
@@ -707,6 +815,7 @@ def _compile_one(
             continue
         command = next_command
         result = _run_compiler(ctx, command, resolver)
+        _record_compile_attempt(ctx, relative, attempt, command, result)
         if result.returncode == 0:
             if index:
                 ctx.warn(
@@ -1153,11 +1262,20 @@ def _render_report(ctx: Context) -> str:
                     "- Варианты вызова: "
                     + "; ".join(f"`{label}`" for label in compile_error["attempts"])
                 )
-            output = "\n".join(
-                part for part in (compile_error.get("stdout"), compile_error.get("stderr")) if part
-            ).strip()
-            if output:
-                lines += ["", "Вывод `resourcecompiler`:", "", "```text", output, "```"]
+            # Каждая попытка — со своей выжимкой и ссылкой на полный журнал: первая
+            # попытка может падать по другой причине, чем последняя.
+            for entry in compile_error.get("attempt_logs") or []:
+                lines += [
+                    "",
+                    f"Попытка «{entry['attempt']}» — код {entry['returncode']}, "
+                    f"полный журнал: `{entry['log']}`",
+                    "",
+                    "```text",
+                    *entry["excerpt"],
+                    "```",
+                ]
+            if not compile_error.get("attempt_logs") and compile_error.get("output"):
+                lines += ["", "Вывод `resourcecompiler`:", "", "```text", *compile_error["output"], "```"]
             if compile_error.get("hints"):
                 lines += [""] + list(compile_error["hints"])
         else:
