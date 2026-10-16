@@ -11,12 +11,23 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 import _support  # noqa: F401 - добавляет tools/ в sys.path
-from _support import COMPILER_CMD_TEMPLATE, FAKE_COMPILER, HUD_FIXTURE, PYTHON, write_fake_game
+from _support import (
+    COMPILER_CMD_TEMPLATE,
+    FAKE_COMPILER,
+    HUD_FIXTURE,
+    PYTHON,
+    read_compiler_log,
+    write_fake_csdk,
+    write_fake_game,
+)
 
 import build_mod
 import dmm_bundle
@@ -431,6 +442,223 @@ class HudSourceChainTest(PipelineCase):
 
 
 
+#: Тесты с настоящим (по поведению) компилятором запускают его как исполняемый
+#: питон-скрипт: на Windows так не получится, а CSDK всё равно только под Windows.
+needs_posix_compiler = unittest.skipIf(
+    sys.platform.startswith("win"), "на Windows питон-скрипт не исполняется как .exe"
+)
+
+
+def _compiled_entries(dist: Path) -> list[str]:
+    archive = vpk.open_vpk(dist / "bhop_trainer_dir.vpk")
+    return archive.list_entries()
+
+
+class CompilerInvocationTest(PipelineCase):
+    """Какой командой сборщик зовёт ``resourcecompiler``.
+
+    В Reduced CSDK 12 нет файлов самой игры (``game/citadel/gameinfo.gi``), поэтому
+    ``-game`` по умолчанию передавать нельзя: компилятор падает ещё до работы.
+    Рабочие пайплайны сообщества (QOLLOCK, Deadlock QoL HUD Mod, Deadlock Stats
+    Editor) вызывают его как ``-nop4 -f -i <исходник>``.
+    """
+
+    def _context(self, argv: list[str]) -> "build_mod.Context":
+        args = build_mod.build_parser().parse_args(argv)
+        return build_mod.Context(
+            root=_support.MOD_ROOT, out_dir=self.out, build_dir=self.build,
+            addon_name="bhop_trainer", version="1.0.0", args=args,
+        )
+
+    def _resolver(self) -> "build_mod._CompilerResolver":
+        csdk = self.tmp / "CSDK"
+        return build_mod._CompilerResolver(
+            compiler=csdk / "bin" / "win64" / "resourcecompiler.exe",
+            sdk=csdk,
+            game_dir=csdk / "game" / "citadel",
+            content_root=csdk / "content" / "citadel_addons" / "bhop_trainer",
+            output_root=csdk / "game" / "citadel_addons" / "bhop_trainer",
+        )
+
+    def test_default_command_has_no_game(self) -> None:
+        ctx = self._context(["--hud-xml", str(HUD_FIXTURE)])
+        source = self._resolver().content_root / "panorama" / "layout" / "hud.xml"
+        command = build_mod._compiler_command(ctx, source, self._resolver())
+        self.assertEqual(
+            [
+                str(self._resolver().compiler),
+                "-nop4", "-f", "-i", str(source),
+            ],
+            command,
+        )
+        self.assertNotIn("-game", command)
+
+    def test_compiler_game_is_passed_when_asked(self) -> None:
+        game = write_fake_game(self.tmp / "Deadlock", HUD_FIXTURE.read_bytes())
+        citadel = game / "game" / "citadel"
+        ctx = self._context(["--hud-xml", str(HUD_FIXTURE), "--compiler-game", str(citadel)])
+        source = self._resolver().content_root / "panorama" / "layout" / "hud.xml"
+        command = build_mod._compiler_command(
+            ctx, source, self._resolver(), game=Path(ctx.args.compiler_game)
+        )
+        self.assertEqual(
+            [
+                str(self._resolver().compiler),
+                "-game", str(citadel),
+                "-nop4", "-f", "-i", str(source),
+            ],
+            command,
+        )
+
+    def test_command_template_placeholder_still_gets_csdk_game(self) -> None:
+        ctx = self._context(["--hud-xml", str(HUD_FIXTURE), "--compiler-cmd", "tool -game {game} -i {source}"])
+        source = self._resolver().content_root / "panorama" / "layout" / "hud.xml"
+        command = build_mod._compiler_command(ctx, source, self._resolver())
+        self.assertEqual(["tool", "-game", str(self._resolver().game_dir), "-i", str(source)], command)
+
+
+@needs_posix_compiler
+class StrictCompilerPipelineTest(PipelineCase):
+    """Сборка с компилятором, который ведёт себя как настоящий.
+
+    Флаги ``-game`` он понимает, но требует рядом ``gameinfo.gi`` — как Reduced
+    CSDK 12, где файлов игры нет. Тесты воспроизводят отказ из трекера
+    («Application unable to load gameinfo.gi file from directory "game\\citadel"»)
+    и проверяют, что после исправления сборка идёт без ``-game``.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.log = self.tmp / "compiler-log.jsonl"
+        patcher = mock.patch.dict(os.environ, {"SIC_FAKE_COMPILER_LOG": str(self.log)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _base(self, csdk: Path, *extra: str) -> list[str]:
+        return [
+            "--hud-xml", str(HUD_FIXTURE),
+            "--csdk", str(csdk),
+            "--out", str(self.out), "--build-dir", str(self.build),
+            "--steps", "prepare,compile,pack",
+            *extra,
+        ]
+
+    def test_flat_csdk_without_gameinfo_builds(self) -> None:
+        """Текущий Reduced CSDK 12: бинарники в корне, ``game/citadel`` нет."""
+        csdk = write_fake_csdk(self.tmp / "Reduced_CSDK_12", layout="flat")
+        self.assertFalse((csdk / "game" / "citadel" / "gameinfo.gi").exists())
+        code, output = _run(self._base(csdk))
+        self.assertEqual(0, code, output)
+        entries = _compiled_entries(self.out)
+        self.assertIn("panorama/layout/hud.vxml_c", entries)
+        self.assertIn("panorama/styles/bhop_trainer.vcss_c", entries)
+        invocations = read_compiler_log(self.log)
+        self.assertTrue(invocations, "компилятор не вызывался")
+        for invocation in invocations:
+            self.assertNotIn("-game", invocation["argv"], invocation["argv"])
+            self.assertIn("-nop4", invocation["argv"])
+            self.assertIn("-f", invocation["argv"])
+        self.assertIn("без -game", json.dumps(invocations, ensure_ascii=False) + output)
+
+    def test_historical_csdk_with_gameinfo_builds_without_game_flag(self) -> None:
+        """Старая раскладка ``game/bin_cs2/win64`` с gameinfo.gi: тоже без -game."""
+        csdk = write_fake_csdk(self.tmp / "Deadlock SDK", layout="game", gameinfo=True)
+        code, output = _run(self._base(csdk))
+        self.assertEqual(0, code, output)
+        for invocation in read_compiler_log(self.log):
+            self.assertNotIn("-game", invocation["argv"], invocation["argv"])
+
+    def test_compiler_game_without_gameinfo_reports_the_real_reason(self) -> None:
+        """``--compiler-game`` на каталог без gameinfo.gi — та самая ошибка из трекера."""
+        csdk = write_fake_csdk(self.tmp / "Reduced_CSDK_12", layout="flat")
+        code, output = _run(self._base(csdk, "--compiler-game", str(csdk / "game" / "citadel")))
+        self.assertEqual(2, code, output)
+        self.assertIn("Can't find 'game\\citadel\\gameinfo.gi'", output)
+        self.assertIn("--compiler-game", output)
+        # Компилятор вызывался с -game: иначе тест проверял бы не то.
+        self.assertIn("-game", read_compiler_log(self.log)[0]["argv"])
+
+        report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("Статус: **ошибка компиляции (VPK не собран)**", report)
+        self.assertNotIn("готов к установке", report)
+        self.assertIn("## Ошибки", report)
+        self.assertIn("Can't find 'game\\citadel\\gameinfo.gi'", report)
+
+    def test_fallback_to_installed_game_gameinfo(self) -> None:
+        """CSDK, которому -game обязателен: сборщик сам берёт gameinfo.gi из игры."""
+        csdk = write_fake_csdk(self.tmp / "Reduced_CSDK_12", layout="flat")
+        game = write_fake_game(self.tmp / "Deadlock", HUD_FIXTURE.read_bytes())
+        patcher = mock.patch.dict(os.environ, {"SIC_FAKE_REQUIRE_GAME": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        code, output = _run(self._base(csdk, "--game-path", str(game)))
+        self.assertEqual(0, code, output)
+        invocations = read_compiler_log(self.log)
+        first = invocations[0]["argv"]
+        fallback = invocations[1]["argv"]
+        self.assertNotIn("-game", first)
+        self.assertEqual("-game", fallback[fallback.index("-game")])
+        self.assertEqual(str(game / "game" / "citadel"), fallback[fallback.index("-game") + 1])
+        self.assertIn("не нашёл gameinfo.gi", output)
+        # Результат забираем в build/, в дереве игры ничего не остаётся.
+        self.assertEqual([], list((game / "game").rglob("*.vxml_c")))
+        report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("gameinfo.gi", report)
+
+
+class ReportHonestyTest(PipelineCase):
+    """Отчёт не должен врать: упавшая сборка — это не «готов к установке»."""
+
+    def test_compiler_failure_report_shows_the_error(self) -> None:
+        # «Компилятор», который всегда падает и печатает понятную причину.
+        failing = (
+            f'"{PYTHON}" -c "import sys; '
+            'sys.stderr.write(\\"boom: compile failed\\"); sys.exit(1)"'
+        )
+        args = [
+            "--hud-xml", str(HUD_FIXTURE),
+            "--compiler-cmd", failing,
+            "--out", str(self.out), "--build-dir", str(self.build),
+            "--steps", "prepare,compile",
+        ]
+        code, output = _run(args)
+        self.assertEqual(2, code, output)
+        report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("Статус: **ошибка компиляции (VPK не собран)**", report)
+        self.assertNotIn("готов к установке", report)
+        self.assertIn("## Ошибки", report)
+        self.assertIn("boom: compile failed", report)
+        self.assertNotIn("Сборка выполнялась вне Windows", report)
+
+    def test_placeholder_compiler_report_does_not_claim_valve_compiler(self) -> None:
+        args = [
+            "--hud-xml", str(HUD_FIXTURE),
+            "--compiler-cmd", COMPILER_CMD_TEMPLATE,
+            "--out", str(self.out), "--build-dir", str(self.build),
+            "--steps", "prepare,compile,pack",
+        ]
+        code, output = _run(args)
+        self.assertEqual(0, code, output)
+        report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("Компиляция подменена шаблоном", report)
+        self.assertNotIn("Компиляция выполнена реальным компилятором CSDK", report)
+
+    @needs_posix_compiler
+    def test_real_compiler_report_names_the_compiler(self) -> None:
+        csdk = write_fake_csdk(self.tmp / "Reduced_CSDK_12", layout="flat")
+        args = [
+            "--hud-xml", str(HUD_FIXTURE), "--csdk", str(csdk),
+            "--out", str(self.out), "--build-dir", str(self.build),
+            "--steps", "prepare,compile,pack",
+        ]
+        code, output = _run(args)
+        self.assertEqual(0, code, output)
+        report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("Компиляцию запускал `resourcecompiler.exe` из CSDK", report)
+        self.assertIn(str(csdk / "bin" / "win64" / "resourcecompiler.exe"), report)
+
+
 class BuildBatTest(unittest.TestCase):
     """Инварианты build.bat: CRLF, только ASCII, кавычки вокруг пути Python."""
 
@@ -474,11 +702,25 @@ class BuildBatTest(unittest.TestCase):
         self.assertNotIn("straight out of the game's .vpk packages", self.text)
 
     def test_builder_accepts_the_same_flags(self) -> None:
-        for flag in ("--hud-xml-url", "--no-hud-download", "--refresh-hud-xml"):
-            self.assertIn(flag, self.text)  # build.bat
+        for flag in ("--hud-xml-url", "--no-hud-download", "--refresh-hud-xml", "--compiler-game"):
+            self.assertIn(flag, self.text)  # build.bat (справка или проброс через ARG_EXTRA)
         source = (_support.MOD_ROOT / "tools" / "build_mod.py").read_text(encoding="utf-8")
-        for flag in ("--hud-xml-url", "--no-hud-download", "--refresh-hud-xml", "--hud-xml"):
+        for flag in ("--hud-xml-url", "--no-hud-download", "--refresh-hud-xml", "--hud-xml",
+                     "--compiler-game"):
             self.assertIn(f'"{flag}"', source)
+
+    def test_csdk_layouts_in_bat_match_the_builder(self) -> None:
+        """build.bat обязан знать те же раскладки CSDK, что и tools/paths.py."""
+        import paths
+
+        relative_parts = {
+            Path(relative).parts[:2] for relative in paths.COMPILER_RELATIVE_PATHS
+            if len(Path(relative).parts) > 3 and Path(relative).parts[0].startswith("bin")
+        }
+        for parts in sorted(relative_parts):
+            joined = "\\".join(parts)
+            self.assertIn(joined, self.text, f"в build.bat нет раскладки {joined}")
+        self.assertNotIn("Check that CSDK is unpacked and that it contains", self.text)
 
 
 if __name__ == "__main__":

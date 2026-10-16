@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 import struct
 import subprocess
 import sys
@@ -21,6 +23,7 @@ import vanilla_hud
 PYTHON = sys.executable
 FAKE_COMPILER = FIXTURES / "fake_compiler.py"
 HUD_FIXTURE = FIXTURES / "hud_min.xml"
+STRICT_COMPILER = FIXTURES / "strict_compiler.py"
 
 COMPILER_CMD_TEMPLATE = (
     f'"{PYTHON}" "{FAKE_COMPILER}" --source {{source}} '
@@ -117,6 +120,46 @@ def write_fake_game(
     (citadel / "pak01_dir.vpk").write_bytes(build_vpk(payloads or {"panorama/layout/hud.xml": b"<root />"}))
     (citadel / "addons").mkdir(exist_ok=True)
     return root
+
+
+
+def write_fake_csdk(root: Path, *, layout: str = "flat", gameinfo: bool = False) -> Path:
+    """Фальшивый CSDK с рабочим (строгим) ``resourcecompiler``.
+
+    ``layout="flat"`` повторяет текущий Reduced CSDK 12: наборы бинарников в корне
+    (``bin/win64/resourcecompiler.exe``), в ``game/`` только ``citadel_addons`` —
+    файлов самой игры нет. ``layout="game"`` — историческую раскладку
+    ``game/bin_cs2/win64``. ``gameinfo=True`` добавляет ``game/citadel/gameinfo.gi``.
+
+    Компилятор — исполняемый питон-скрипт: на Windows так нельзя, поэтому тесты,
+    которым он нужен, там пропускаются (настоящий CSDK всё равно только под Windows).
+    """
+    root = Path(root)
+    relative = (
+        Path("bin") / "win64" / "resourcecompiler.exe"
+        if layout == "flat"
+        else Path("game") / "bin_cs2" / "win64" / "resourcecompiler.exe"
+    )
+    compiler = root / relative
+    compiler.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(STRICT_COMPILER, compiler)
+    compiler.chmod(0o755)
+    (root / "content" / "citadel_addons").mkdir(parents=True, exist_ok=True)
+    (root / "game" / "citadel_addons").mkdir(parents=True, exist_ok=True)
+    if gameinfo:
+        (root / "game" / "citadel").mkdir(parents=True, exist_ok=True)
+        (root / "game" / "citadel" / "gameinfo.gi").write_text(
+            "// synthetic CSDK gameinfo (fixture)\n", encoding="utf-8"
+        )
+    return root
+
+
+def read_compiler_log(path: Path) -> list[dict]:
+    """Прочитать журнал вызовов ``strict_compiler`` (по строке JSON на вызов)."""
+    path = Path(path)
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def write_loose_hud(game_dir: Path, hud_xml_bytes: bytes) -> Path:

@@ -12,8 +12,10 @@
    страницы подтверждения и догрузкой недокачанного);
 3. распаковывает его в безопасный каталог (**не** OneDrive / Desktop /
    Documents — там ломаются права и инструменты падают);
-4. приводит раскладку к виду ``<CSDK>/game/bin_cs2/win64/resourcecompiler.exe``
-   (архив может приехать с лишним корневым каталогом);
+4. приводит раскладку к корню CSDK, где лежит ``resourcecompiler.exe``
+   (``game/bin_cs2/win64``, ``bin/win64`` и другие известные варианты —
+   см. ``paths.COMPILER_RELATIVE_PATHS``); в архиве может быть лишний
+   корневой каталог;
 5. проверяет результат и возвращает путь к компилятору.
 
 Только стандартная библиотека: ``urllib`` вместо requests, ``zipfile`` /
@@ -604,20 +606,30 @@ def _compiler_root(root: Path) -> Path | None:
     """Найти внутри ``root`` каталог, который действительно является CSDK.
 
     Архив может приехать с лишним корневым каталогом (``Reduced_CSDK_12/``), а
-    раскладки бывают разные: ``game/bin_cs2/win64`` и ``game/bin/win64``.
+    раскладки бывают разные: бинарники лежат либо под ``game/bin*``, либо прямо
+    в корне (``bin``, ``bin_cs2``, ``bin_server``, ``bin_tools``) — как в текущем
+    Reduced CSDK 12. Поэтому ищем по обеим схемам.
     """
     candidates: list[Path] = [root]
-    for pattern in ("*/game/bin*/win64/resourcecompiler*.exe", "*/*/game/bin*/win64/resourcecompiler*.exe"):
+    patterns = (
+        "*/game/bin*/win64/resourcecompiler*",
+        "*/*/game/bin*/win64/resourcecompiler*",
+        "*/bin*/win64/resourcecompiler*",
+        "*/*/bin*/win64/resourcecompiler*",
+    )
+    for pattern in patterns:
         for found in sorted(root.glob(pattern)):
             for ancestor in found.parents:
                 if paths_mod.csdk_compiler(ancestor) is not None and ancestor not in candidates:
                     candidates.append(ancestor)
                 if ancestor == root:
                     break
-    for candidate in candidates:
-        if paths_mod.csdk_compiler(candidate) is not None:
-            return candidate
-    return None
+    valid = [candidate for candidate in candidates if paths_mod.csdk_compiler(candidate) is not None]
+    if not valid:
+        return None
+    # Берём самый внешний каталог: если архив приехал с лишней папкой-обёрткой
+    # (``Reduced_CSDK_12/``), корень CSDK — именно она, а не вложенный каталог.
+    return min(valid, key=lambda path: (len(path.parts), str(path)))
 
 
 def _move_contents(source: Path, destination: Path) -> None:
@@ -658,7 +670,8 @@ def install_from_archive(
         actual = _compiler_root(staging)
         if actual is None:
             raise CsdkError(
-                f"в распакованном архиве нет game/bin_cs2/win64/resourcecompiler.exe: {archive}\n"
+                f"в распакованном архиве нет resourcecompiler.exe (искали game/bin_cs2/win64,\n"
+                f"  game/bin/win64, bin/win64 и другие раскладки): {archive}\n"
                 "  Проверь, что это именно Reduced CSDK 12, и укажи каталог вручную: --csdk PATH"
             )
         if actual != staging:

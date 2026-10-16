@@ -62,6 +62,7 @@ build.bat --clean -y --csdk-install-dir "C:\DeadlockModding"
 | `--steps LIST` | `prepare,compile,pack,dmm,report` (по умолчанию все) |
 | `--out DIR` | куда положить артефакты (по умолчанию `dist`) |
 | `--version X.Y.Z` | версия мода |
+| `--compiler-game PATH` | каталог с `gameinfo.gi` для `-game` — нужен только тем сборкам CSDK, которые без него не компилируют (по умолчанию `-game` не передаётся) |
 | `--allow-uncompiled` | собрать без компилятора: в игре такой мод не заработает |
 | `--clean` | сначала удалить `build\` и `dist\` |
 | `--test` | перед сборкой прогнать тесты сборщика |
@@ -121,6 +122,7 @@ python3 tools/install_dmm.py verify
 | Только поставить CSDK, ничего не собирая | `python3 tools/csdk_setup.py` |
 | Только подготовить дерево аддона + патч `hud.xml` | `… --steps prepare` |
 | Компилятор кладёт результат в нестандартное место | `… --compiled-from /путь/к/дереву` |
+| CSDK не компилирует без `-game` (в самом CSDK нет `gameinfo.gi`) | `… --compiler-game "…/Deadlock/game/citadel"` — сборщик и сам попробует этот вариант, но ключ задаёт каталог явно |
 | Упаковать дерево, скомпилированное вручную в CSDK | `… --csdk PATH --steps prepare,pack` |
 | Итог в JSON (для CI) | `… --json` (логи уходят в stderr, в stdout — только JSON) |
 | Другой номер/название сборки | `… --version 1.2.0 --title "Bhop Trainer (test)" --addon-name bhopt_test` |
@@ -195,7 +197,7 @@ python3 tools/csdk_setup.py --json                # итог машинно-read
 | `dmm-bundle/` | Пакет для Deadlock Mod Manager (`mod-interchange.json` + `files/…`) |
 | `bhop_trainer-dmm.zip` | Тот же пакет архивом: можно распаковать (для импорта) или перетащить целиком в DMM в «Add Mods» |
 | `SHA256SUMS.txt` | Контрольные суммы артефактов |
-| `BUILD_REPORT.md` | Отчёт: статус, входные хеши, что попало в VPK, заметки и предупреждения |
+| `BUILD_REPORT.md` | Отчёт: честный статус (включая «ошибка компиляции» с командой и выводом `resourcecompiler`), входные хеши, что попало в VPK, заметки и предупреждения |
 
 Рабочие файлы (не коммитятся): `build/content/citadel_addons/<addon>` — дерево аддона для CSDK,
 `build/game/citadel_addons/<addon>` — скомпилированные ресурсы, `build/vanilla/hud.xml` — копия
@@ -266,12 +268,43 @@ python3 tools/install_dmm.py cfg --dry-run    # только показать, �
 | `.js` / `.vjs` | `.vjs_c` |
 | `.svg`, `.png`, `.wav` | `.vsvg_c`, `.vtex_c`, `.vsnd_c` |
 
-Сборщик запускает `resourcecompiler.exe` из CSDK (`<CSDK>/game/bin_cs2/win64`), складывая исходники
-в `<CSDK>/content/citadel_addons/<addon>` и забирая результат из `<CSDK>/game/citadel_addons/<addon>`.
-Пути CSDK ищутся в `--csdk`, переменных `DEADLOCK_CSDK` / `CSDK_ROOT` / `CSDK_PATH` и типичных местах;
-скачать CSDK 12: <https://deadlockmodding.pages.dev/modding-tools/csdk-12> (не распаковывать в OneDrive).
-Руками этого делать не нужно — как именно сборщик ставит CSDK сам, описано выше, в разделе
-«Автоустановка CSDK».
+Сборщик запускает `resourcecompiler.exe` из CSDK, складывая исходники в
+`<CSDK>/content/citadel_addons/<addon>` и забирая результат из `<CSDK>/game/citadel_addons/<addon>`
+(так устроены все пайплайны сообщества). Компилятор ищется во всех известных раскладках CSDK:
+старой (`game/bin_cs2/win64`, `game/bin/win64`, `game/bin_tools/win64`, `game/bin_server/win64`) и
+нынешней, где наборы бинарников вынесены в корень (`bin/win64` и т. д. — так распакован Reduced
+CSDK 12 из автоустановки). Пути CSDK ищутся в `--csdk`, переменных `DEADLOCK_CSDK` / `CSDK_ROOT` /
+`CSDK_PATH` и типичных местах; скачать CSDK 12:
+<https://deadlockmodding.pages.dev/modding-tools/csdk-12> (не распаковывать в OneDrive). Руками этого
+делать не нужно — как именно сборщик ставит CSDK сам, описано выше, в разделе «Автоустановка CSDK».
+
+### Как сборщик вызывает `resourcecompiler`
+
+```
+resourcecompiler.exe -nop4 -f -i "<CSDK>\content\citadel_addons\bhop_trainer\panorama\layout\hud.xml"
+```
+
+`-game` **не** передаётся. Компилятору он и не нужен: аддон определяется по пути исходника внутри
+`content/citadel_addons/<addon>`, а `-game` нужен только файлам вне `content/`. Зато с `-game`
+начинаются проблемы: в Reduced CSDK 12 нет файлов самой игры, поэтому компилятор падает ещё до
+работы —
+
+```
+Application unable to load gameinfo.gi file from directory "game\citadel"
+Can't find 'game\citadel\gameinfo.gi'
+```
+
+ровно так, как это делал сборщик до исправления (он передавал `-game <CSDK>/game/citadel`).
+Тот же вызов (`-nop4 -f -i`, без `-game`) используют рабочие пайплайны сообщества — QOLLOCK,
+Deadlock QoL HUD Mod и Deadlock Stats Editor.
+
+Если конкретной сборке CSDK `-game` всё-таки нужен, сборщик повторит вызов с `gameinfo.gi`
+установленной игры (и предупредит об этом в логе и отчёте), а задать каталог вручную можно ключом
+`--compiler-game`:
+
+```bash
+python3 tools/build_mod.py --game-path "…/Deadlock" --compiler-game "…/Deadlock/game/citadel"
+```
 
 Без компилятора:
 
@@ -292,9 +325,10 @@ compile перебирает известные места и берёт пер�
 1. `build/game/citadel_addons/<addon>` — если компилятор вызван обёрткой с явным output-каталогом;
 2. `--compiled-from DIR` — если ты указал его сам;
 3. `<CSDK>/game/citadel_addons/<addon>` — штатное место CSDK;
-4. дерево самой игры (`<Deadlock>/game`) — так получается при компиляции прямо в дереве игры.
-   Отсюда ресурсы берутся, **только если они появились или обновились в этом запуске**, и после
-   копирования удаляются: сборка не должна оставлять мусор в файлах игры.
+4. дерево самой игры (`<Deadlock>/game`) — так получается при компиляции прямо в дереве игры или
+   когда `-game` указал на установленную игру. Отсюда ресурсы берутся, **только если они появились
+   или обновились в этом запуске**, и после копирования удаляются: сборка не должна оставлять мусор
+   в файлах игры.
 
 Если ресурс не найден нигде, сборка останавливается с подсказкой указать `--compiled-from`.
 Дополнительно: если скомпилированный ресурс оказался старее своего исходника, сборщик
@@ -314,7 +348,7 @@ compile перебирает известные места и берёт пер�
 | `tools/vanilla_hud.py` | Где взять ванильный `hud.xml`: файл, дерево игры/CSDK, паки, кэш, зеркало депо |
 | `tools/hud_patch.py` | Патч `hud.xml`: вставка панели и include стилей, идемпотентно, с откатом |
 | `tools/dmm_bundle.py` | Пакет «Deadlock Mod Interchange» и zip для DMM |
-| `tools/paths.py` | Поиск Deadlock / CSDK / данных DMM, проверка запущенного процесса игры |
+| `tools/paths.py` | Поиск Deadlock / CSDK / данных DMM, раскладки CSDK (`game/bin_*` и корневые `bin_*`), проверка запущенного процесса игры |
 | `tools/csdk_setup.py` | Автоустановка CSDK 12: поиск, скачивание с догрузкой, распаковка, проверка компилятора |
 | `tools/gameinfo.py` | Проверка и правка `gameinfo.gi` с резервными копиями |
 
@@ -331,8 +365,9 @@ python3 -m unittest discover -s tests -p "test_*.py"
 многокомпонентных паков (preload, секции MD5/подписи, `mmap`), правила `vpk-modinfo`,
 патч `hud.xml` (идемпотентность, CRLF, откат), поиск ванильного `hud.xml` (цепочка источников,
 кэш, скачивание и внятная ошибка, когда исходника нет нигде — сеть в тестах подменяется),
-пакет interchange (ключи, пути, хеши), установщик (gameinfo, слоты, dry-run) и сквозная сборка
-через `fixtures/fake_compiler.py`. Фикстуры написаны в этом репозитории — игровые файлы Valve
+пакет interchange (ключи, пути, хеши), установщик (gameinfo, слоты, dry-run), раскладки CSDK
+(`tests/test_paths.py`), вызов `resourcecompiler` (без `-game`, запасной вариант с `gameinfo.gi`
+установленной игры — `fixtures/strict_compiler.py`) и сквозная сборка через `fixtures/fake_compiler.py`. Фикстуры написаны в этом репозитории — игровые файлы Valve
 (в том числе настоящий `hud.xml`) не коммитятся, а берутся из установленной игры.
 
 ---
@@ -419,6 +454,8 @@ python3 -m unittest discover -s tests -p "test_*.py"
 |---|---|
 | Панели нет в игре | Прогони `python3 tools/install_dmm.py verify`: он показывает, найден ли VPK в `citadel/addons` и есть ли строка `Game citadel/addons` в `gameinfo.gi` |
 | Мод импортировался в DMM, но не работает | Скорее всего игра была запущена: DMM не патчит `gameinfo.gi` при живом `citadel.exe`. Закрой игру и нажми **Launch modded** |
+| `resourcecompiler` падает: `Can't find 'game\citadel\gameinfo.gi'` | Сборщик передал `-game` сборке CSDK, в которой нет файлов игры (обычно Reduced CSDK 12). Убери `--compiler-game` и `-game` из `--compiler-cmd`: компилятор определяет аддон по пути исходника в `content/citadel_addons/<addon>`. Если CSDK без `-game` не работает — укажи каталог с настоящим `gameinfo.gi`: `--compiler-game "<Deadlock>\game\citadel"` |
+| CSDK найден, но «не найден с resourcecompiler.exe» | CSDK распакован не целиком или лежит во вложенной папке. Сборщик ищет компилятор в `game/bin_*` и в корневых `bin_*`; проверь `python3 tools/csdk_setup.py --csdk PATH` или укажи корень CSDK (тот, где рядом лежат `content/` и `game/`) |
 | Сборка падает: «не нашёл ванильный panorama/layout/hud.xml» | В паках игры нет исходника — там только скомпилированный `hud.vxml_c`. Дай сети доступ (сборщик сам скачает файл с зеркала депо) либо передай его через `--hud-xml`; см. раздел «Откуда берётся ванильный `hud.xml`» |
 | Нужен ванильный `hud.xml` без сети | Возьми файл любым способом (Source 2 Viewer, зеркало депо на другой машине) и передай: `--hud-xml файл` или `--hud-xml-url file:///путь/к/hud.xml`; кэш `build/vanilla/hud.xml` переиспользуется сам |
 | Все зеркала недоступны (блокировка/фаервол) | Сборщик перебирает `raw.githubusercontent.com`, `cdn.jsdelivr.net` и `api.github.com`; если все три молчат — скачай `game/citadel/pak01_dir/panorama/layout/hud.xml` из `SteamTracking/GameTracking-Deadlock` на другой машине и передай `--hud-xml` |

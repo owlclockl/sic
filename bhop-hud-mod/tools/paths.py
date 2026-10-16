@@ -130,8 +130,8 @@ def _auto_install_root() -> Path:
 def find_csdk(explicit: Path | None = None) -> Path | None:
     """Найти CSDK с рабочим ``resourcecompiler``.
 
-    Поддерживается «Reduced CSDK 12» и полный CSDK: компилятор ищется в
-    ``game/bin_cs2/win64`` и ``game/bin/win64``.
+    Поддерживается «Reduced CSDK 12» и полный CSDK: компилятор ищется во всех
+    известных раскладках (см. ``COMPILER_RELATIVE_PATHS``).
     """
     candidates: list[Path] = []
     if explicit:
@@ -159,22 +159,73 @@ def find_csdk(explicit: Path | None = None) -> Path | None:
     return None
 
 
+#: Где в CSDK может лежать ``resourcecompiler`` — раскладки у сборок разные.
+#:
+#: Порядок — от исторических к нынешним. В старых CSDK 12 (и в полном CSDK от
+#: Valve) бинарники лежат под ``game/``; в текущем Reduced CSDK 12 наборы
+#: бинарников (``bin``, ``bin_cs2``, ``bin_server``, ``bin_tools``) вынесены в
+#: корень архива, а в ``game/`` остаётся только ``citadel_addons`` — файлов самой
+#: игры там нет. Живые примеры сообщества: ``game/bin_cs2/win64`` (QOLLOCK,
+#: Deadlock QoL HUD Mod), ``game/bin_tools/win64`` (DeadPacker, Deadlock Stats
+#: Editor), ``game/bin_server/win64`` (Hiokiii), корневой ``bin/win64`` —
+#: установка Reduced CSDK 12 после распаковки ``tools/csdk_setup.py``.
+COMPILER_RELATIVE_PATHS: tuple[Path, ...] = tuple(
+    Path(directory) / "win64" / name
+    for directory in (
+        "game/bin_cs2",
+        "game/bin",
+        "game/bin_tools",
+        "game/bin_server",
+        "bin_cs2",
+        "bin",
+        "bin_tools",
+        "bin_server",
+    )
+    for name in ("resourcecompiler.exe", "resourcecompiler")
+)
+
+
+def _looks_like_csdk_root(path: Path) -> bool:
+    """Похож ли каталог на корень CSDK (проект Source 2).
+
+    Нужно для раскладок с бинарниками в корне (``bin/win64``): без этой проверки
+    корнем «сойдёт» и подкаталог старой раскладки — ``<CSDK>/game``, ведь в нём
+    лежит ``bin_cs2/win64/resourcecompiler.exe``. У настоящего корня CSDK рядом с
+    бинарниками обязательно есть ``content/`` (а у старой раскладки — ``game/``).
+    """
+    return (path / "content").is_dir() or (path / "game").is_dir()
+
+
 def csdk_compiler(csdk_root: Path) -> Path | None:
     """Путь к ``resourcecompiler`` внутри CSDK, если он там есть."""
     csdk_root = Path(csdk_root)
-    for relative in (
-        Path("game") / "bin_cs2" / "win64" / "resourcecompiler.exe",
-        Path("game") / "bin" / "win64" / "resourcecompiler.exe",
-        Path("bin") / "win64" / "resourcecompiler.exe",
-    ):
+    for relative in COMPILER_RELATIVE_PATHS:
         candidate = csdk_root / relative
-        if candidate.is_file():
-            return candidate
+        if not candidate.is_file():
+            continue
+        if relative.parts[0].startswith("bin") and not _looks_like_csdk_root(csdk_root):
+            # Бинарники в корне, но каталог не тянет на корень CSDK — это
+            # подкаталог (например ``<CSDK>/game``), а не сам CSDK.
+            continue
+        return candidate
     return None
 
 
+def csdk_game_dir(csdk_root: Path) -> Path:
+    """Каталог «базового мода» внутри CSDK: ``<CSDK>/game/citadel``.
+
+    ``resourcecompiler`` берёт отсюда ``gameinfo.gi``, когда его просят явно
+    (``-game``). В Reduced CSDK 12 этого файла обычно нет — и это не мешает
+    компиляции: аддон определяется по пути исходника внутри
+    ``content/citadel_addons/<addon>``, а ``-game`` такому компилятору передавать
+    нельзя (он падает с «unable to load gameinfo.gi file from directory»).
+    """
+    return Path(csdk_root) / "game" / "citadel"
+
+
 def csdk_gameinfo(csdk_root: Path) -> Path:
-    return Path(csdk_root) / "game" / "citadel" / "gameinfo.gi"
+    """``<CSDK>/game/citadel/gameinfo.gi`` — есть не во всех сборках CSDK."""
+    return csdk_game_dir(csdk_root) / "gameinfo.gi"
 
 
 def find_dmm_data_dir() -> Path | None:

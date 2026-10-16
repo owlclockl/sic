@@ -31,15 +31,36 @@ COMPILER_RELATIVE = Path("game") / "bin_cs2" / "win64" / "resourcecompiler.exe"
 _quiet = lambda message: None  # noqa: E731
 
 
-def make_fake_archive(archive: Path, *, root_dir: str = "Reduced_CSDK_12", nested: bool = True) -> Path:
-    """Собрать zip «как настоящий»: внутри — папка ``Reduced_CSDK_12`` с CSDK."""
+def make_fake_archive(
+    archive: Path,
+    *,
+    root_dir: str = "Reduced_CSDK_12",
+    nested: bool = True,
+    layout: str = "game",
+) -> Path:
+    """Собрать zip «как настоящий»: внутри — папка ``Reduced_CSDK_12`` с CSDK.
+
+    ``layout="game"`` — историческая раскладка (``game/bin_cs2/win64``),
+    ``layout="flat"`` — та, что приезжает в текущем Reduced CSDK 12: наборы
+    бинарников в корне (``bin/win64``), ``content/`` и ``game/citadel_addons``
+    рядом, файлов самой игры (``game/citadel/gameinfo.gi``) нет.
+    """
     archive.parent.mkdir(parents=True, exist_ok=True)
-    payload = [
-        (f"{root_dir}/{COMPILER_RELATIVE.as_posix()}" if nested else COMPILER_RELATIVE.as_posix(),
-         b"MZ fake resourcecompiler"),
-        (f"{root_dir}/csdkcfg.exe" if nested else "csdkcfg.exe", b"MZ fake cfg"),
-        (f"{root_dir}/game/citadel/gameinfo.gi" if nested else "game/citadel/gameinfo.gi", b"// gameinfo"),
-    ]
+    prefix = f"{root_dir}/" if nested else ""
+    if layout == "flat":
+        compiler_rel = Path("bin") / "win64" / "resourcecompiler.exe"
+        payload = [
+            (f"{prefix}{compiler_rel.as_posix()}", b"MZ fake resourcecompiler"),
+            (f"{prefix}csdkcfg.exe", b"MZ fake cfg"),
+            (f"{prefix}content/citadel_addons/keep.txt", b"content tree"),
+            (f"{prefix}game/citadel_addons/keep.txt", b"game tree"),
+        ]
+    else:
+        payload = [
+            (f"{prefix}{COMPILER_RELATIVE.as_posix()}", b"MZ fake resourcecompiler"),
+            (f"{prefix}csdkcfg.exe", b"MZ fake cfg"),
+            (f"{prefix}game/citadel/gameinfo.gi", b"// gameinfo"),
+        ]
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zipped:
         for name, data in payload:
             zipped.writestr(name, data)
@@ -187,6 +208,19 @@ class InstallFromArchiveTest(unittest.TestCase):
         self.assertFalse((install / "Reduced_CSDK_12").exists())
         # Временная папка распаковки не должна остаться.
         self.assertFalse(Path(str(install) + ".unpacking").exists())
+
+    def test_reduced_csdk_with_binaries_in_root_is_installed(self) -> None:
+        """Текущий Reduced CSDK 12: бинарники в корне, обёртка снимается."""
+        archive = make_fake_archive(self.tmp / "flat-layout.zip", layout="flat")
+        install = self.tmp / "install" / "Reduced_CSDK_12"
+        compiler = csdk_setup.install_from_archive(archive, install)
+        self.assertEqual(install / "bin" / "win64" / "resourcecompiler.exe", compiler)
+        self.assertTrue((install / "content" / "citadel_addons").is_dir())
+        self.assertTrue((install / "game" / "citadel_addons").is_dir())
+        self.assertFalse((install / "Reduced_CSDK_12").exists())
+        # Корнем CSDK должен быть сам каталог, а не его подкаталог `game`.
+        self.assertEqual(install, paths.find_csdk(install))
+        self.assertEqual(install / "bin" / "win64" / "resourcecompiler.exe", paths.csdk_compiler(install))
 
     def test_already_flat_archive_is_accepted(self) -> None:
         archive = make_fake_archive(self.tmp / "flat.zip", nested=False)
