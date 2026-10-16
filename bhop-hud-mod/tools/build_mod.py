@@ -80,10 +80,9 @@ import vanilla_hud  # noqa: E402
 import vpk  # noqa: E402
 
 TOOL = dmm_bundle.MANAGER_ID
-#: 1.2.0: базовый мод CSDK (game/citadel/gameinfo.gi) починяется на месте,
-#: `-game` перебирается от CSDK к дереву игры, отказ модуля `modtools`
-#: (`error 126`) больше не отправляет перекачивать CSDK, если ресурс записан.
-TOOL_VERSION = "1.3.0"
+#: 1.4.0: не разрешаем паковать/устанавливать HUD без двух обязательных
+#: скомпилированных ресурсов: layout и стилей.
+TOOL_VERSION = "1.4.0"
 
 MOD_TITLE = "Deadlock :: Bhop Trainer HUD"
 MOD_AUTHOR = "owlclockl"
@@ -94,6 +93,10 @@ MOD_DESCRIPTION = (
 )
 STYLE_SRC = "s2r://panorama/styles/bhop_trainer.vcss"
 STYLES_FILENAME = "bhop_trainer.vcss"
+REQUIRED_COMPILED_RESOURCES = (
+    "panorama/layout/hud.vxml_c",
+    "panorama/styles/bhop_trainer.vcss_c",
+)
 
 #: Соответствие «исходник → скомпилированный ресурс».
 #:
@@ -1308,6 +1311,29 @@ def step_pack(ctx: Context) -> None:
             payloads[path.relative_to(tree_root).as_posix()] = path.read_bytes()
     if not payloads:
         raise SystemExit("нечего паковать: дерево аддона пустое")
+
+    if not ctx.sources_only:
+        normalized_payloads = {
+            vpk.normalize_virtual_path(name): data for name, data in payloads.items()
+        }
+        missing = [name for name in REQUIRED_COMPILED_RESOURCES if name not in normalized_payloads]
+        empty = [
+            name for name in REQUIRED_COMPILED_RESOURCES
+            if name in normalized_payloads and not normalized_payloads[name]
+        ]
+        if missing or empty:
+            problems = []
+            if missing:
+                problems.append("нет обязательных скомпилированных ресурсов: " + ", ".join(missing))
+            if empty:
+                problems.append("обязательные ресурсы пусты: " + ", ".join(empty))
+            raise SystemExit(
+                "отказываюсь собирать устанавливаемый VPK: " + "; ".join(problems) + ".\n"
+                "Такой пакет может завершить запуск игры ошибкой «Unable to load layout file hud.xml».\n"
+                "Пересобери с CSDK 12 и проверь BUILD_REPORT.md; не устанавливай неполный VPK."
+            )
+        trace_log.detail("обязательные ресурсы HUD присутствуют и не пусты")
+
     trace_log.detail(f"пакую дерево {tree_root}")
     for name, data in sorted(payloads.items()):
         trace_log.detail(f"  {name} — {trace_log.human_bytes(len(data))}")

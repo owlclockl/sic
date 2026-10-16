@@ -21,6 +21,8 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import os
 import re
 import shutil
 import subprocess
@@ -51,6 +53,10 @@ MARKER_ENTRIES = (
     "panorama/styles/bhop_trainer.vcss_c",
     "panorama/styles/bhop_trainer.vcss",
 )
+REQUIRED_COMPILED_RESOURCES = (
+    "panorama/layout/hud.vxml_c",
+    "panorama/styles/bhop_trainer.vcss_c",
+)
 MAX_SLOT = 99
 
 
@@ -62,7 +68,7 @@ class FoundMod:
     title: str = ""
 
     def describe(self) -> str:
-        kind = "скомпилированный" if self.compiled else "только исходники (в игре не заработает)"
+        kind = "полный скомпилированный HUD" if self.compiled else "неполный/только исходники (в игре не заработает)"
         slot = f"pak{self.slot:02d}_dir.vpk" if self.slot is not None else self.path.name
         return f"{slot} — {kind} — {self.path}"
 
@@ -82,26 +88,59 @@ def find_installed_mods(game_dir: Path) -> list[FoundMod]:
             archive = vpk.open_vpk(path)
         except (vpk.VpkError, OSError):
             continue
-        marker = next((name for name in MARKER_ENTRIES if archive.contains(name)), None)
-        if marker is None:
-            continue
-        slot_match = re.fullmatch(r"pak(\d+)_dir\.vpk", path.name)
-        title = ""
+        with archive:
+            marker = next((name for name in MARKER_ENTRIES if archive.contains(name)), None)
+            has_all_compiled = all(archive.contains(name) for name in REQUIRED_COMPILED_RESOURCES)
         try:
             embed = modinfo.read_embed(path.read_bytes())
         except OSError:
             embed = None
-        if embed is not None:
-            title = embed.title
+        owned_by_builder = bool(
+            embed is not None
+            and embed.written_by.get("tool") == dmm_bundle.MANAGER_ID
+        )
+        if marker is None and not owned_by_builder:
+            continue
+        slot_match = re.fullmatch(r"pak(\d+)_dir\.vpk", path.name)
         found.append(
             FoundMod(
                 path=path,
                 slot=int(slot_match.group(1)) if slot_match else None,
-                compiled=marker.endswith("_c"),
-                title=title,
+                compiled=has_all_compiled,
+                title=embed.title if embed is not None else "",
             )
         )
     return found
+
+
+def check_installable_vpk(path: Path) -> list[str]:
+    """Проверить ресурсы, без которых HUD-мод может уронить запуск игры.
+
+    Особенно важно проверять ``hud.vxml_c``: VPK только со стилями проходит
+    старую проверку маркера, но заменяет/не предоставляет layout HUD, после чего
+    движок может показать «Unable to load layout file ... hud.xml».
+    """
+    path = Path(path)
+    try:
+        archive = vpk.open_vpk(path)
+    except (vpk.VpkError, OSError) as error:
+        return [f"VPK не читается: {error}"]
+
+    problems: list[str] = []
+    with archive:
+        for resource in REQUIRED_COMPILED_RESOURCES:
+            entry = archive.find(resource)
+            if entry is None:
+                problems.append(f"нет обязательного скомпилированного ресурса {resource}")
+                continue
+            try:
+                data = archive.read_entry(entry, verify_crc=True)
+            except vpk.VpkError as error:
+                problems.append(f"{resource}: ошибка чтения/CRC: {error}")
+                continue
+            if not data:
+                problems.append(f"обязательный ресурс пуст: {resource}")
+    return problems
 
 
 def used_slots(game_dir: Path) -> set[int]:
@@ -149,6 +188,13 @@ def cmd_check(args: argparse.Namespace) -> int:
         archive = vpk.VpkArchive(VPK_SOURCE, data)
         print(f"  VPK: {VPK_SOURCE} ({len(data)} Б, записей {len(archive.entries)})")
         print(f"  sha256: {vpk.sha256_of(data)}")
+        resource_problems = check_installable_vpk(VPK_SOURCE)
+        if resource_problems:
+            print("  ГОТОВНОСТЬ К УСТАНОВКЕ: НЕТ")
+            for problem in resource_problems:
+                print(f"    ! {problem}")
+        else:
+            print("  ГОТОВНОСТЬ К УСТАНОВКЕ: да (layout и стили скомпилированы)")
     else:
         print(f"  VPK не собран: {VPK_SOURCE}")
         print("  Собери: python3 tools/build_mod.py --game-path <Deadlock> --csdk <CSDK>")
@@ -204,6 +250,16 @@ def cmd_stage(args: argparse.Namespace) -> int:
     if problems:
         raise SystemExit("пакет повреждён:\n  - " + "\n  - ".join(problems))
 
+    bundled_vpks = sorted(BUNDLE_DIR.rglob("*.vpk"))
+    if not bundled_vpks:
+        raise SystemExit("в пакете DMM нет VPK")
+    for bundled_vpk in bundled_vpks:
+        problems = check_installable_vpk(bundled_vpk)
+        if problems:
+            raise SystemExit(
+                f"отказ от публикации неполного VPK {bundled_vpk}:\n  - " + "\n  - ".join(problems)
+            )
+
     target = Path(args.to).expanduser().resolve() if args.to else _default_stage_dir()
     if target.exists():
         shutil.rmtree(target)
@@ -213,10 +269,11 @@ def cmd_stage(args: argparse.Namespace) -> int:
     print(f"Манифест для DMM: {manifest}")
     print()
     print("В Deadlock Mod Manager:")
-    print("  1) Mods → Import → Open interchange bundle")
-    print(f"  2) выбрать файл: {manifest}")
-    print("  3) подтвердить импорт (мод появится в «My Mods» выключенным/включённым)")
-    print("  4) закрыть Deadlock и нажать Launch modded")
+    print("  1) Отключи/удали старую копию Bhop Trainer HUD, если она уже есть")
+    print("  2) Mods → Import → Open interchange bundle")
+    print(f"  3) выбрать файл: {manifest}")
+    print("  4) подтвердить импорт и оставить включённой только одну копию мода")
+    print("  5) закрыть Deadlock и нажать Launch modded")
     print()
     print("Альтернатива без диалога: перетащи zip из dist/ в раздел Add Mods.")
     if args.open:
@@ -259,8 +316,19 @@ def cmd_verify(args: argparse.Namespace) -> int:
         print("  " + mod.describe())
 
     problems: list[str] = []
+    if len(found) > 1:
+        problems.append(
+            f"найдено несколько копий Bhop Trainer ({len(found)}); оставь только одну, "
+            "иначе старый HUD VPK может перебить новую сборку"
+        )
+    for mod in found:
+        resource_problems = check_installable_vpk(mod.path)
+        problems.extend(f"{mod.path.name}: {problem}" for problem in resource_problems)
     if not any(mod.compiled for mod in found):
-        problems.append("в VPK только исходники (.vcss) — игра грузит лишь скомпилированные ресурсы; пересобери с CSDK")
+        problems.append(
+            "в VPK только исходники или отсутствует часть обязательных скомпилированных ресурсов "
+            "(нужны hud.vxml_c и bhop_trainer.vcss_c); пересобери с CSDK"
+        )
     if not status.has_addons_path:
         problems.append("в gameinfo.gi нет «Game citadel/addons» — нужно нажать Launch modded в DMM")
     if not status.braces_balanced:
@@ -288,28 +356,124 @@ def cmd_direct(args: argparse.Namespace) -> int:
             f"нет собранного VPK ({VPK_SOURCE}): сначала собери мод\n"
             "  python3 tools/build_mod.py --game-path <Deadlock> --csdk <CSDK>"
         )
-    archive = vpk.open_vpk(VPK_SOURCE)
-    if not archive.contains(MARKER_ENTRIES[0]):
-        print("Внимание: в VPK нет скомпилированного bhop_trainer.vcss_c — мод может не заработать.")
+    resource_problems = check_installable_vpk(VPK_SOURCE)
+    if resource_problems:
+        raise SystemExit(
+            "отказ от установки VPK: он не содержит полный скомпилированный HUD:\n  - "
+            + "\n  - ".join(resource_problems)
+            + "\nПересобери с CSDK 12; такой пакет может вызвать FATAL ERROR при запуске Deadlock."
+        )
 
-    slot = pick_slot(game_dir, args.slot)
-    target = addons_dir(game_dir) / f"pak{slot:02d}_dir.vpk"
+    if args.slot is not None and not 1 <= args.slot <= MAX_SLOT:
+        raise SystemExit(f"номер слота должен быть в диапазоне 1..{MAX_SLOT}")
+
+    addons_root = addons_dir(game_dir)
+    installed = find_installed_mods(game_dir)
+    root = addons_root.resolve()
+    nested = [mod for mod in installed if mod.path.parent.resolve() != root]
+    if nested:
+        paths = ", ".join(str(mod.path) for mod in nested)
+        raise SystemExit(
+            "Bhop Trainer уже найден в профиле/подпапке DMM; прямую установку отменяю, "
+            f"чтобы не смешивать две установки:\n  {paths}\n"
+            "Удали или обнови старую копию в DMM, затем импортируй новый пакет через DMM."
+        )
+
+    existing_direct = [
+        mod.path for mod in installed
+        if mod.path.parent.resolve() == root
+        and re.fullmatch(r"pak\d+_dir\.vpk", mod.path.name)
+    ]
+    owned_slots = {
+        int(match.group(1))
+        for path in existing_direct
+        if (match := re.fullmatch(r"pak(\d+)_dir\.vpk", path.name))
+    }
+    if args.slot is not None and args.slot in owned_slots:
+        slot = args.slot
+    elif args.slot is not None:
+        slot = pick_slot(game_dir, args.slot)
+    elif owned_slots:
+        # Обновляем старый прямой install на месте, а не складываем новый pakNN,
+        # который мог бы проиграть оставшейся старой версии по приоритету загрузки.
+        slot = min(owned_slots)
+    else:
+        slot = pick_slot(game_dir)
+
+    target = addons_root / f"pak{slot:02d}_dir.vpk"
     status = gameinfo.status(game_dir / paths_mod.GAMEINFO_RELATIVE)
+    source_hash = vpk.sha256_of_file(VPK_SOURCE)
+    target_is_current = target.is_file() and vpk.sha256_of_file(target) == source_hash
 
     print(f"Deadlock: {game_dir}")
     print(f"План: {VPK_SOURCE.name} → {target}")
+    if existing_direct:
+        print(f"      найдено старых прямых копий Bhop Trainer: {len(existing_direct)}; обновлю на месте и сохраню backup")
     print(f"      gameinfo.gi: {'строка citadel/addons уже есть' if status.has_addons_path else 'будет добавлена строка citadel/addons'}")
-    if paths_mod.is_game_running():
-        print("      ! Deadlock сейчас запущен — закрой игру, иначе файлы могут не примениться")
+    game_running = paths_mod.is_game_running()
+    if game_running:
+        print("      ! Deadlock сейчас запущен — изменения нельзя применять к работающей игре")
     if args.dry_run:
         print("Режим --dry-run: ничего не записано.")
         return 0
+    if game_running:
+        raise SystemExit("закрой Deadlock и повтори установку; файлы игры не изменены")
 
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(VPK_SOURCE, target)
-    print(f"Скопировано: {target}")
-    outcome = gameinfo.enable_addons_path(game_dir / paths_mod.GAMEINFO_RELATIVE)
-    print(outcome.message)
+    addons_root.mkdir(parents=True, exist_ok=True)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    for old in existing_direct:
+        if old == target and target_is_current:
+            continue
+        backup = old.with_name(f"{old.name}.bhop-backup-{stamp}")
+        suffix = 1
+        while backup.exists():
+            backup = old.with_name(f"{old.name}.bhop-backup-{stamp}-{suffix}")
+            suffix += 1
+        shutil.copy2(old, backup)
+        print(f"Резервная копия старого мода: {backup}")
+
+    gameinfo_path = game_dir / paths_mod.GAMEINFO_RELATIVE
+    temp_target = target.with_name(f".{target.name}.installing-{stamp}")
+    outcome = None
+    try:
+        if not target_is_current:
+            shutil.copy2(VPK_SOURCE, temp_target)
+        outcome = gameinfo.enable_addons_path(gameinfo_path)
+        if not target_is_current:
+            os.replace(temp_target, target)
+    except Exception:
+        try:
+            if temp_target.exists():
+                temp_target.unlink()
+        except OSError:
+            pass
+        if outcome is not None and outcome.changed:
+            try:
+                gameinfo.disable_addons_path(gameinfo_path)
+            except Exception as rollback_error:
+                print(f"Не удалось автоматически откатить gameinfo.gi: {rollback_error}")
+        raise
+
+    stale: list[Path] = []
+    for old in existing_direct:
+        if old == target:
+            continue
+        try:
+            old.unlink()
+            print(f"Удалена старая копия: {old}")
+        except OSError:
+            stale.append(old)
+
+    if not target_is_current:
+        print(f"Установлено: {target}")
+    else:
+        print(f"Уже актуально: {target}")
+    print(outcome.message if outcome is not None else "gameinfo.gi не менялся")
+    if stale:
+        print("ВНИМАНИЕ: старые копии не удалось удалить; не запускай игру, пока не уберёшь их:")
+        for path in stale:
+            print(f"  {path}")
+        return 1
     print("\nГотово. Полностью закрой Deadlock и запусти заново.")
     print("Откатить: python3 tools/install_dmm.py uninstall --restore-gameinfo")
     return 0
