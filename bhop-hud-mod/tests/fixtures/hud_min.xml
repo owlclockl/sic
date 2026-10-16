@@ -1,0 +1,20 @@
+<!--
+  Синтетическая фикстура для тестов: минимальный layout в форме Deadlock hud.xml.
+  ВАЖНО: это НЕ файл Valve — он написан специально для тестов (структура повторена:
+  блок <styles> со <include>, корневой <root> и элемент <CitadelHud>), чтобы
+  проверять патч без распространения игровых ассетов.
+-->
+<root>
+	<styles>
+		<include src="s2r://panorama/styles/citadel_base_styles.vcss" />
+		<include src="s2r://panorama/styles/hud_common.vcss" />
+	</styles>
+	<CitadelHud class="WindowRoot" hittest="false" disallowedstyleflags="hover,descendantfocus">
+		<CitadelHudTopBar id="TopBar" hittest="false" />
+		<Panel id="CenterElements">
+			<CitadelHudHealthContainer id="health_and_abilities_container" />
+			<CitadelHudAbilities id="hud_signature" class="abilities" slots="signature_1 signature_2" />
+		</Panel>
+		<CitadelHudEscapeMenu id="EscapeMenu" />
+	</CitadelHud>
+</root>

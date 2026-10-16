@@ -1,0 +1,19 @@
+# Артефакты сборки мода Deadlock :: Bhop Trainer
+build/
+dist/
+
+# Python: кэш и локальные окружения
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Редакторы и ОС
+.DS_Store
+Thumbs.db
+*.swp
+
+# Локальные копии игровых файлов (в т.ч. ванильный hud.xml из паков Deadlock) —
+# в репозитории им не место: это ассеты Valve.
+bhop-hud-mod/build/vanilla/
+*.hud.xml.local
