@@ -68,6 +68,8 @@ set "ARG_EXTRA="
 set "ARG_CSDK_URL="
 set "ARG_CSDK_DIR="
 set "DO_CSDK_REDOWNLOAD=0"
+set "FORCE_CSDK_INSTALL=0"
+set "BUILD_RETRIED=0"
 set "NO_CSDK_DOWNLOAD=0"
 set "CSDK_ROOT_FILE=%TEMP%\deadlock-bhop-csdk-root.txt"
 if not defined TEMP set "CSDK_ROOT_FILE=%MOD_DIR%\build\csdk-root.txt"
@@ -240,6 +242,7 @@ echo.
 set "CSDK_DIR="
 set "CSDK_SETUP_ARGS=--root-file "%CSDK_ROOT_FILE%""
 if defined ARG_CSDK_DIR set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% --install-dir "%ARG_CSDK_DIR%""
+if "%FORCE_CSDK_INSTALL%"=="1" set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% --force-install"
 if defined ARG_CSDK_URL set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% --url "%ARG_CSDK_URL%""
 if "%DO_CSDK_REDOWNLOAD%"=="1" set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% --redownload"
 if exist "%CSDK_ROOT_FILE%" del /q "%CSDK_ROOT_FILE%" >nul 2>nul
@@ -326,6 +329,45 @@ if "%BUILD_RC%"=="3" goto :build_needs_compile
 if "%BUILD_RC%"=="130" goto :build_cancel
 
 :build_failed
+if "%BUILD_RETRIED%"=="1" goto :build_failed_final
+findstr /i /c:"Unable to load module" /c:"error 126" "%DIST_DIR%\BUILD_REPORT.md" >nul 2>nul
+if not errorlevel 1 goto :repair_csdk
+findstr /s /i /c:"Unable to load module" /c:"error 126" "%MOD_DIR%\build\compile_logs\*.log" >nul 2>nul
+if errorlevel 1 goto :build_failed_final
+
+:repair_csdk
+echo.
+echo [!] resourcecompiler hit Windows DLL load error 126 (modtools).
+echo     I will preserve the current CSDK, download a fresh copy, and retry once.
+if not defined CSDK_DIR goto :build_failed_final
+set "BUILD_RETRIED=1"
+set "BROKEN_CSDK=%CSDK_DIR%"
+:choose_csdk_backup
+set "CSDK_BACKUP=%BROKEN_CSDK%.broken-%RANDOM%"
+if exist "%CSDK_BACKUP%" goto :choose_csdk_backup
+echo     Moving broken SDK to: %CSDK_BACKUP%
+move "%BROKEN_CSDK%" "%CSDK_BACKUP%" >nul
+if errorlevel 1 goto :repair_move_failed
+set "ARG_CSDK_DIR=%BROKEN_CSDK%"
+set "CSDK_DIR="
+set "FORCE_CSDK_INSTALL=1"
+set "DO_CSDK_REDOWNLOAD=1"
+call :csdk_auto
+set "FORCE_CSDK_INSTALL=0"
+if not defined CSDK_DIR goto :repair_download_failed
+echo.
+echo [i] Fresh CSDK installed; retrying the build once...
+goto :do_build
+
+:repair_move_failed
+echo [!] Could not move the old CSDK aside; leaving it untouched.
+goto :build_failed_final
+
+:repair_download_failed
+echo [!] Automatic CSDK repair failed. The old SDK is preserved at %CSDK_BACKUP%.
+goto :build_failed_final
+
+:build_failed_final
 echo.
 echo [X] Build failed (exit code %BUILD_RC%).
 echo     Details are in %DIST_DIR%\BUILD_REPORT.md

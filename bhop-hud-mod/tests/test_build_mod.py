@@ -741,6 +741,15 @@ class BuildBatTest(unittest.TestCase):
                      "--compiler-game"):
             self.assertIn(f'"{flag}"', source)
 
+    def test_batch_retries_after_modtools_dll_error(self) -> None:
+        """Windows launcher quarantines the bad SDK, force-downloads, and retries once."""
+        self.assertIn('findstr /i /c:"Unable to load module" /c:"error 126"', self.text)
+        self.assertIn('set "BUILD_RETRIED=1"', self.text)
+        self.assertIn('set "FORCE_CSDK_INSTALL=1"', self.text)
+        self.assertIn('--force-install', self.text)
+        self.assertIn('move "%BROKEN_CSDK%" "%CSDK_BACKUP%"', self.text)
+        self.assertIn('goto :do_build', self.text)
+
     def test_csdk_layouts_in_bat_match_the_builder(self) -> None:
         """build.bat обязан знать те же раскладки CSDK, что и tools/paths.py."""
         import paths
