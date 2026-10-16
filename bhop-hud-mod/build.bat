@@ -18,6 +18,9 @@ rem               --csdk-url "https://..."   (your own CSDK archive link)
 rem               --no-csdk-download         (never download, ask for the path)
 rem               --csdk-redownload          (ignore the cached archive)
 rem               --hud-xml "C:\hud.xml"   (vanilla hud.xml when the game is absent)
+rem               --hud-xml-url "https://..."  (your own link to hud.xml)
+rem               --refresh-hud-xml        (ignore the cached hud.xml after a patch)
+rem               --no-hud-download        (never download hud.xml)
 rem               --version 1.2.0
 rem               --steps prepare,compile,pack,dmm,report
 rem               --out "D:\dist"
@@ -87,6 +90,9 @@ if /i "%~1"=="--csdk-install-dir" set "ARG_CSDK_DIR=%~2" & shift & shift & goto 
 if /i "%~1"=="--csdk-redownload" set "DO_CSDK_REDOWNLOAD=1" & shift & goto :parse_args
 if /i "%~1"=="--no-csdk-download" set "NO_CSDK_DOWNLOAD=1" & shift & goto :parse_args
 if /i "%~1"=="--hud-xml" set "ARG_HUD=%~2" & shift & shift & goto :parse_args
+if /i "%~1"=="--hud-xml-url" set "ARG_HUD_URL=%~2" & shift & shift & goto :parse_args
+if /i "%~1"=="--refresh-hud-xml" set "DO_HUD_REFRESH=1" & shift & goto :parse_args
+if /i "%~1"=="--no-hud-download" set "NO_HUD_DOWNLOAD=1" & shift & goto :parse_args
 if /i "%~1"=="--steps" set "ARG_STEPS=%~2" & shift & shift & goto :parse_args
 if /i "%~1"=="--out" set "ARG_OUT=%~2" & shift & shift & goto :parse_args
 if /i "%~1"=="--version" set "ARG_VERSION=%~2" & shift & shift & goto :parse_args
@@ -298,6 +304,9 @@ echo.
 set "BUILD_ARGS="
 if defined GAME_DIR set "BUILD_ARGS=%BUILD_ARGS% --game-path "%GAME_DIR%""
 if defined ARG_HUD set "BUILD_ARGS=%BUILD_ARGS% --hud-xml "%ARG_HUD%""
+if defined ARG_HUD_URL set "BUILD_ARGS=%BUILD_ARGS% --hud-xml-url "%ARG_HUD_URL%""
+if "%DO_HUD_REFRESH%"=="1" set "BUILD_ARGS=%BUILD_ARGS% --refresh-hud-xml"
+if "%NO_HUD_DOWNLOAD%"=="1" set "BUILD_ARGS=%BUILD_ARGS% --no-hud-download"
 if defined CSDK_DIR set "BUILD_ARGS=%BUILD_ARGS% --csdk "%CSDK_DIR%""
 if "%NO_CSDK_DOWNLOAD%"=="1" set "BUILD_ARGS=%BUILD_ARGS% --no-auto-csdk"
 if defined ARG_CSDK_DIR set "BUILD_ARGS=%BUILD_ARGS% --csdk-install-dir "%ARG_CSDK_DIR%""
@@ -627,9 +636,9 @@ goto :eof
 
 :game_missing
 echo.
-echo [!] Deadlock was not found, and there is nowhere else to take the
-echo     vanilla hud.xml from: the builder reads panorama/layout/hud.xml
-echo     straight out of the game's .vpk packages and patches it.
+echo [!] Deadlock was not found. The builder can still get the vanilla
+echo     hud.xml from a saved file, from the cache of older builds, or
+echo     from the depot mirror (needs the network for that one).
 echo.
 echo     [1] Type the Deadlock folder by hand (you can drag it here)
 echo     [2] Point at an already saved vanilla hud.xml
@@ -766,6 +775,9 @@ echo     --csdk-url URL       your own CSDK archive link
 echo     --no-csdk-download   never download: ask for the folder instead
 echo     --csdk-redownload    ignore the cached archive and fetch it again
 echo     --hud-xml FILE       an already saved vanilla panorama/layout/hud.xml
+echo     --hud-xml-url URL    your own link to the vanilla hud.xml
+echo     --no-hud-download    never download hud.xml (saved file -^> cache)
+echo     --refresh-hud-xml    ignore the cached hud.xml (after a game patch)
 echo     --steps LIST         prepare,compile,pack,dmm,report (all by default)
 echo     --out DIR            where to put artifacts (dist by default)
 echo     --version X.Y.Z      mod version

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import mmap
 import struct
 import unittest
 import zlib
@@ -203,6 +204,69 @@ class HashTest(unittest.TestCase):
                 "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
                 vpk.sha256_of_file(path),
             )
+
+
+class PreloadAndSectionTest(unittest.TestCase):
+    """Тонкости настоящих паков Valve: preload-хвост в дереве и секции за данными."""
+
+    def test_preload_bytes_are_part_of_the_file(self) -> None:
+        preload = b"preloaded-head"
+        tail = b"archive-tail"
+        payload = preload + tail
+        data = craft_vpk(
+            [("panorama/layout/hud.xml", zlib.crc32(payload) & 0xFFFFFFFF, INLINE, 0, len(tail), preload)],
+            tail,
+        )
+        archive = vpk.VpkArchive(Path("<mem>"), data)
+        entry = archive.find("panorama/layout/hud.xml")
+        self.assertIsNotNone(entry)
+        self.assertEqual(len(preload), entry.preload_bytes)
+        self.assertEqual(len(payload), entry.total_length)
+        self.assertEqual(payload, archive.read_entry(entry, verify_crc=True))
+
+    def test_sections_after_data_do_not_shift_offsets(self) -> None:
+        # Секции MD5/подписи идут ПОСЛЕ секции данных, поэтому offset'ы не меняют.
+        payload = b"layout-bytes"
+        data = craft_vpk(
+            [("panorama/layout/hud.xml", zlib.crc32(payload) & 0xFFFFFFFF, INLINE, 0, len(payload))],
+            payload,
+            sections=(28, 48, 20),
+        )
+        archive = vpk.VpkArchive(Path("<mem>"), data)
+        self.assertEqual(payload, archive.extract("panorama/layout/hud.xml"))
+
+    def test_crc_mismatch_is_detected_on_request(self) -> None:
+        data = craft_vpk([("a/b.vcss", 0xDEADBEEF, INLINE, 0, 2)], b"XY")
+        archive = vpk.VpkArchive(Path("<mem>"), data)
+        entry = archive.find("a/b.vcss")
+        self.assertIsNotNone(entry)
+        # без проверки данные отдаются как есть, с проверкой — понятная ошибка
+        self.assertEqual(b"XY", archive.read_entry(entry))
+        with self.assertRaises(vpk.VpkError) as ctx:
+            archive.read_entry(entry, verify_crc=True)
+        self.assertIn("CRC32", str(ctx.exception))
+
+    def test_crc_mismatch_breaks_reading_of_truncated_entry(self) -> None:
+        data = craft_vpk([("a/b.vcss", zlib.crc32(b"XY") & 0xFFFFFFFF, INLINE, 0, 2)], b"X")
+        archive = vpk.VpkArchive(Path("<mem>"), data)
+        with self.assertRaises(vpk.VpkError):
+            archive.read_entry(archive.find("a/b.vcss"), verify_crc=True)
+
+
+class LargePakTest(unittest.TestCase):
+    def test_large_pak_is_memory_mapped_and_can_be_closed(self) -> None:
+        payload = b"Z" * (vpk.MMAP_THRESHOLD + 4096)
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pak07_dir.vpk"
+            path.write_bytes(vpk.build_vpk({"panorama/styles/big.vcss_c": payload}))
+            archive = vpk.open_vpk(path)
+            self.assertIsInstance(archive.buffer, mmap.mmap)
+            self.assertEqual(len(payload), len(archive.extract("panorama/styles/big.vcss_c")))
+            with archive as opened:
+                self.assertEqual([], vpk.verify_vpk(opened.buffer, {"panorama/styles/big.vcss_c": payload}))
+            archive.close()
+            self.assertEqual(b"", archive.buffer)
+
 
 
 if __name__ == "__main__":

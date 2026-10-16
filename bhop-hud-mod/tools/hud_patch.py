@@ -1,10 +1,11 @@
 """Патч ванильного ``panorama/layout/hud.xml``: вставка панели и подключение стилей.
 
 Мод-панорама не может «добавить» панель в HUD, не переопределив ``hud.xml``:
-игра читает именно этот layout. Поэтому сборщик берёт **ванильный** файл из
-паков игры, вставляет в него сниппет из ``src/bhop_trainer.vxml`` перед
-закрывающим ``</CitadelHud>`` и добавляет ``<include>`` стилей в блок
-``<styles>`` — ровно то, что README предлагает делать руками.
+игра читает именно этот layout. Поэтому сборщик берёт **ванильный** файл (откуда
+— решает ``tools/vanilla_hud.py``), вставляет в него сниппет из
+``src/bhop_trainer.vxml`` перед закрывающим ``</CitadelHud>`` и добавляет
+``<include>`` стилей в блок ``<styles>`` — ровно то, что README предлагает
+делать руками.
 
 Патч идемпотентен (маркеры ``bhop-trainer:*``) и умеет откатываться.
 """
@@ -193,18 +194,3 @@ def revert_hud_xml(text: str) -> PatchResult:
 
 def is_patched(text: str) -> bool:
     return MARK_BEGIN in text and MARK_STYLES in text
-
-
-def locate_vanilla_hud_xml(game_dir: Path | None, explicit: Path | None) -> tuple[Path | None, bytes | None]:
-    """Найти ванильный hud.xml: явный файл или извлечение из паков игры."""
-    if explicit is not None:
-        path = Path(explicit)
-        if not path.is_file():
-            raise HudPatchError(f"указанный hud.xml не найден: {path}")
-        return path, path.read_bytes()
-    if game_dir is None:
-        return None, None
-    from vpk import extract_from_game  # локальный импорт: модуль не обязателен для чистого патча
-
-    data = extract_from_game(Path(game_dir) / "game" / "citadel", HUD_XML_VIRTUAL_PATH)
-    return None, data
