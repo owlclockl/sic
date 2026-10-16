@@ -19,10 +19,14 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import trace_log  # noqa: E402
 from vpk import (INLINE_ARCHIVE_INDEX, VpkArchive, VpkError, build_vpk, crc32_of,
                  normalize_virtual_path, sha256_of)
 
@@ -267,6 +271,12 @@ def imprint(
     identity = existing.identity if existing else Identity.of_bytes(vpk_bytes)
     first_imprinted_at = existing.first_imprinted_at if existing else _iso_now(moment)
     written_at = _iso_now(moment)
+    trace_log.detail(
+        f"метаданные vpk-modinfo: записей в паке {len(source.entries)}, "
+        f"identity {identity.sha256[:16]}…"
+        + (", блок уже был — перезаписываю" if existing else ", блок ставится впервые")
+    )
+    trace_log.trace(f"первые 96 символов identity: {identity.sha256[:96]}")
 
     payloads: dict[str, bytes] = {}
     for entry in source.entries:

@@ -15,7 +15,15 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import trace_log  # noqa: E402
+
 GAME_DIR_NAME = "Deadlock"
+
+
+def _paths(items) -> str:
+    """Пути одной строкой — так их удобно читать и копировать из журнала."""
+    return ", ".join(str(item) for item in items)
 GAMEINFO_RELATIVE = Path("game") / "citadel" / "gameinfo.gi"
 DMM_APP_ID = "dev.stormix.deadlock-mod-manager"
 DMM_SUPPORTED_TIP = "https://deadlockmods.app/"
@@ -87,25 +95,41 @@ def _library_roots(steam_root: Path) -> list[Path]:
 
 
 def find_game_dir(explicit: Path | None = None) -> Path | None:
-    """Найти установленный Deadlock. ``explicit`` проверяется первым."""
+    """Найти установленный Deadlock. ``explicit`` проверяется первым.
+
+    Каждый проверенный вариант попадает в журнал: видно, куда именно смотрел
+    сборщик и почему забраковал каталог (искали ``game/citadel/gameinfo.gi``).
+    """
     if explicit:
+        trace_log.detail(f"проверяю каталог игры из аргумента: {explicit}")
         found = normalize_game_dir(explicit)
         if found is None:
             raise FileNotFoundError(f"по пути {explicit} нет Deadlock (ожидался game/citadel/gameinfo.gi)")
+        trace_log.decision("каталог игры", found, "найден game/citadel/gameinfo.gi")
         return found
 
     for variable in ("DEADLOCK_DIR", "DEADLOCK_GAME_DIR", "DEADLOCK_PATH"):
         value = os.environ.get(variable)
         if value:
+            trace_log.detail(f"проверяю {variable}={value}")
             found = normalize_game_dir(Path(value))
             if found:
+                trace_log.decision("каталог игры", found, f"переменная окружения {variable}")
                 return found
+            trace_log.rejected(f"{variable}={value}", "нет game/citadel/gameinfo.gi")
 
-    for steam_root in _steam_roots():
-        for library in _library_roots(steam_root):
+    steam_roots = _steam_roots()
+    trace_log.detail(f"каталоги Steam, которые вижу: {_paths(steam_roots) if steam_roots else 'ни одного'}")
+    for steam_root in steam_roots:
+        libraries = _library_roots(steam_root)
+        trace_log.detail(f"библиотеки Steam в {steam_root}: {_paths(libraries)}")
+        for library in libraries:
             candidate = library / "steamapps" / "common" / GAME_DIR_NAME
             if _is_game_dir(candidate):
+                trace_log.decision("каталог игры", candidate, "найден в библиотеке Steam")
                 return candidate
+            trace_log.trace(f"  нет Deadlock: {candidate}")
+    trace_log.rejected("Steam", "ни в одной библиотеке нет steamapps/common/Deadlock с gameinfo.gi")
     return None
 
 
@@ -152,10 +176,13 @@ def find_csdk(explicit: Path | None = None) -> Path | None:
         Path("/opt/csdk"),
         Path("/opt/deadlock-csdk"),
     ]
+    trace_log.detail(f"ищу CSDK в {len(candidates)} местах: {_paths(candidates)}")
     for candidate in candidates:
         resolved = csdk_compiler(candidate)
         if resolved is not None:
+            trace_log.decision("корень CSDK", candidate, f"найден компилятор {resolved}")
             return candidate
+        trace_log.trace(f"  нет resourcecompiler.exe: {candidate}")
     return None
 
 

@@ -35,6 +35,7 @@ import dmm_bundle  # noqa: E402
 import gameinfo  # noqa: E402
 import modinfo  # noqa: E402
 import paths as paths_mod  # noqa: E402
+import trace_log  # noqa: E402
 import vpk  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -396,6 +397,7 @@ def _common_arguments() -> argparse.ArgumentParser:
                         help="папка Deadlock (или её game/citadel)")
     common.add_argument("--dist", default=argparse.SUPPRESS,
                         help="каталог артефактов сборки, если собирали с --out (по умолчанию dist)")
+    trace_log.patch_cli(common, suppress_defaults=True)
     return common
 
 
@@ -450,19 +452,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         BUNDLE_DIR = DIST_DIR / "dmm-bundle"
         VPK_SOURCE = DIST_DIR / "bhop_trainer_dir.vpk"
         globals().update(DIST_DIR=DIST_DIR, BUNDLE_DIR=BUNDLE_DIR, VPK_SOURCE=VPK_SOURCE)
+
+    trace_log.reset()
+    journal = trace_log.apply_cli(
+        args,
+        default_dir=DIST_DIR / "logs",
+        prefix=f"install-{getattr(args, 'command', 'cmd')}",
+        header=f"Установка мода: {getattr(args, 'command', '?')}",
+    )
+    journal.snapshot(extra={
+        "команда": getattr(args, "command", "?"),
+        "каталог артефактов": DIST_DIR,
+        "пакет DMM": BUNDLE_DIR,
+        "VPK": VPK_SOURCE,
+        **{name: getattr(args, name) for name in sorted(vars(args))
+           if name not in ("command", "func", "game_path", "dist")},
+    })
     try:
-        return args.func(args)
+        code = args.func(args)
+        journal.summary(
+            status=("готово" if code == 0 else f"завершено с кодом {code}"),
+            artifacts=[VPK_SOURCE] if VPK_SOURCE.is_file() else [],
+        )
+        return code
     except (SystemExit, KeyboardInterrupt) as error:
         if isinstance(error, KeyboardInterrupt):
             print("прервано пользователем")
             return 130
+        if isinstance(error, KeyboardInterrupt):
+            trace_log.summary(status="прервано пользователем")
         message = getattr(error, "code", None) or str(error)
         if isinstance(message, str) and message:
             print(f"ОШИБКА: {message}")
+            if not isinstance(error, KeyboardInterrupt):
+                trace_log.exception(error, where="установка мода")
+                trace_log.summary(status=f"ошибка: {message.splitlines()[0]}")
         return 2
     except (gameinfo.GameInfoError, vpk.VpkError, dmm_bundle.BundleError, OSError) as error:
         print(f"ОШИБКА: {error}")
+        trace_log.exception(error, where="установка мода")
+        trace_log.summary(status=f"ошибка: {error}")
         return 2
+    finally:
+        trace_log.shutdown()
 
 
 if __name__ == "__main__":

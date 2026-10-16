@@ -298,6 +298,130 @@ class MissingCompilerTest(PipelineCase):
         self.assertIn("только исходники", report)
 
 
+class LogFileTest(PipelineCase):
+    """Один подробный журнал на сборку: его и отправляют при разборе поломки.
+
+    Требование простое и жёсткое: в файле должно быть всё, что было в консоли —
+    окружение, параметры запуска, каждая внешняя команда с аргументами и полным
+    выводом, и итоговый блок со статусом и артефактами. Консоль при этом
+    остаётся читаемой, а ``--json`` не ломается.
+    """
+
+    def test_log_has_the_whole_run_with_the_compiler_output(self) -> None:
+        log = self.tmp / "run.log"
+        code, output = _run(self.base_args() + ["--log-file", str(log)])
+        self.assertEqual(0, code, output)
+        text = log.read_text(encoding="utf-8")
+        for needle in (
+            "Окружение",                  # окружение машины
+            "параметры запуска",          # все ключи со значениями
+            "шаг prepare", "шаг compile", "шаг pack", "шаг dmm", "шаг report",
+            "ЗАПУСК", "ИТОГ: код 0",      # каждая команда и её результат
+            "fake resourcecompiler",      # вывод компилятора целиком
+            "sha256",                     # хеши артефактов
+            "ИТОГ", "Журнал целиком",     # итоговый блок и путь к файлу
+        ):
+            self.assertIn(needle, text, needle)
+        # консоль и файл — один и тот же текст
+        for line in ("Автосборка bhop_trainer", "готово."):
+            self.assertIn(line, text)
+            self.assertIn(line, output)
+        # в журнале есть и точные пути: по ним видно, какое дерево использовалось
+        self.assertIn(str(self.build), text)
+        self.assertIn("fake_compiler.py", text)
+
+    def test_log_is_written_next_to_artifacts_by_default(self) -> None:
+        code, output = _run(self.base_args())
+        self.assertEqual(0, code, output)
+        logs = sorted((self.out / "logs").glob("build-*.log"))
+        self.assertEqual(1, len(logs), logs)
+        self.assertTrue((self.out / "logs" / "latest.log").is_file())
+        # журнал растёт во время сборки, поэтому в контрольные суммы он не попадает
+        sums = (self.out / "SHA256SUMS.txt").read_text(encoding="utf-8")
+        self.assertNotIn("logs", sums)
+        self.assertIn("bhop_trainer_dir.vpk", sums)
+
+    def test_json_mode_keeps_stdout_clean_and_still_writes_the_log(self) -> None:
+        log = self.tmp / "json.log"
+        code, stdout = _run(self.base_args() + ["--json", "--log-file", str(log)],
+                            keep_streams_separate=True)
+        self.assertEqual(0, code, stdout)
+        payload = json.loads(stdout)  # stdout — только JSON, ничего лишнего
+        self.assertEqual("ok", payload["status"])
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("ИТОГ", text)
+        self.assertIn("fake resourcecompiler", text)
+
+    def test_quiet_is_shorter_than_trace_and_trace_has_hashes(self) -> None:
+        quiet = self.tmp / "quiet.log"
+        traced = self.tmp / "trace.log"
+        code, output = _run(self.base_args() + ["--log-file", str(quiet), "--quiet"])
+        self.assertEqual(0, code, output)
+        code, output = _run(self.base_args() + ["--log-file", str(traced), "--trace"])
+        self.assertEqual(0, code, output)
+        self.assertLess(quiet.stat().st_size, traced.stat().st_size)
+        traced_text = traced.read_text(encoding="utf-8")
+        self.assertIn("PATH[0]", traced_text)
+        self.assertIn("исходник:", traced_text)
+
+    def test_no_log_file_flag_keeps_the_console_only(self) -> None:
+        code, output = _run(self.base_args() + ["--no-log-file"])
+        self.assertEqual(0, code, output)
+        self.assertFalse((self.out / "logs").exists())
+        self.assertIn("Журнал целиком:", output)  # в консоли путь всё равно назван
+
+    def test_failure_leaves_a_readable_log_with_the_reason(self) -> None:
+        log = self.tmp / "fail.log"
+        code, output = _run([
+            "--hud-xml", str(self.tmp / "нет-такого.xml"),
+            "--out", str(self.out), "--build-dir", str(self.build), "--log-file", str(log),
+        ])
+        self.assertEqual(build_mod.EXIT_ERROR, code, output)
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("ОШИБКА", text)
+        self.assertIn("ИТОГ", text)
+        self.assertIn("статус:", text)
+        self.assertIn("первая ошибка", text)
+
+    def test_unwritable_log_path_does_not_break_the_build(self) -> None:
+        blocked = self.tmp / "занято"
+        blocked.write_text("это файл, а не каталог", encoding="utf-8")
+        code, output = _run(self.base_args() + ["--log-file", str(blocked / "logs" / "run.log")])
+        self.assertEqual(0, code, output)
+        self.assertIn("не удалось открыть файл журнала", output)
+        self.assertIn("готово.", output)
+
+
+    def test_console_and_file_carry_the_same_text(self) -> None:
+        """Что видно в консоли, то и лежит в файле — журнал можно отправлять как есть."""
+        log = self.tmp / "same.log"
+        code, output = _run(self.base_args() + ["--log-file", str(log)])
+        self.assertEqual(0, code, output)
+        text = log.read_text(encoding="utf-8")
+        missing = [line for line in output.splitlines() if line.strip() and line not in text]
+        self.assertEqual([], missing[:5], "в файл не попали строки консоли")
+        self.assertGreater(len(text.splitlines()), 100, "журнал подозрительно короткий")
+
+    def test_log_dir_flag_decides_where_the_log_goes(self) -> None:
+        logs = self.tmp / "журналы"
+        code, output = _run(self.base_args() + ["--log-dir", str(logs)])
+        self.assertEqual(0, code, output)
+        files = sorted(logs.glob("build-*.log"))
+        self.assertEqual(1, len(files), files)
+        self.assertTrue((logs / "latest.log").is_file())
+        self.assertIn(str(files[0]), output)
+
+    def test_journal_keeps_the_sources_and_the_resource_hashes(self) -> None:
+        """По журналу видно, ЧТО именно уехало в VPK: размер и sha256 каждого файла."""
+        log = self.tmp / "hashes.log"
+        code, output = _run(self.base_args() + ["--log-file", str(log), "--trace"])
+        self.assertEqual(0, code, output)
+        text = log.read_text(encoding="utf-8")
+        for needle in ("исходник:", "панель мода:", "стили мода:", "sha256 ванильного hud.xml"):
+            self.assertIn(needle, text, needle)
+        self.assertIn("VPK прошёл проверку", text)  # проверка записанного VPK
+
+
 class FailureTest(PipelineCase):
     def test_missing_hud_source_is_a_clean_error(self) -> None:
         empty_game = self.tmp / "empty-game"
@@ -311,12 +435,14 @@ class FailureTest(PipelineCase):
         self.assertIn("hud.xml", output)
 
     def test_unknown_step_is_rejected(self) -> None:
-        code, output = _run(["--steps", "prepare,deploy", "--hud-xml", str(HUD_FIXTURE)])
+        code, output = _run(["--steps", "prepare,deploy", "--hud-xml", str(HUD_FIXTURE),
+                             "--out", str(self.out), "--build-dir", str(self.build), "--no-log-file"])
         self.assertEqual(build_mod.EXIT_ERROR, code, output)
         self.assertIn("неизвестные шаги", output)
 
     def test_bad_addon_name_is_rejected(self) -> None:
-        code, output = _run(["--addon-name", "Bad-Name", "--hud-xml", str(HUD_FIXTURE)])
+        code, output = _run(["--addon-name", "Bad-Name", "--hud-xml", str(HUD_FIXTURE),
+                             "--out", str(self.out), "--build-dir", str(self.build), "--no-log-file"])
         self.assertEqual(build_mod.EXIT_ERROR, code, output)
         self.assertIn("addon-name", output)
 
@@ -729,6 +855,26 @@ class ModuleLoadFailureTest(PipelineCase):
         self.assertIn("модулей инструментов", report)
         self.assertIn("--csdk-redownload", report)
 
+    def test_journal_has_the_full_evidence_of_the_126(self) -> None:
+        """Отказ модуля инструментов должен попадать в журнал целиком, а не выжимкой."""
+        csdk = write_fake_csdk(self.tmp / "CSDK", layout="game", gameinfo=True)
+        log = self.tmp / "126.log"
+        args = [
+            "--hud-xml", str(HUD_FIXTURE),
+            "--csdk", str(csdk),
+            "--compiler-cmd", self._template(),
+            "--out", str(self.out), "--build-dir", str(self.build),
+            "--steps", "prepare,compile,pack,dmm", "--log-file", str(log),
+        ]
+        code, output = _run(args)
+        self.assertEqual(0, code, output)
+        text = log.read_text(encoding="utf-8")
+        self.assertIn("ЗАПУСК", text)
+        self.assertIn("ИТОГ: код 1", text)                     # компилятор упал — видно
+        self.assertIn("Unable to load module modtools", text)  # и весь его вывод тоже
+        self.assertIn("модулей инструментов", text)            # подсказки про эту машину
+        self.assertIn("Журнал целиком", text)                  # путь к файлу в конце
+
     def test_stale_resource_of_a_previous_run_is_not_accepted(self) -> None:
         """Прошлогодний ``*_c`` в дереве CSDK не должен спасать упавшую сборку."""
         csdk = write_fake_csdk(self.tmp / "CSDK", layout="game", gameinfo=True)
@@ -913,6 +1059,123 @@ class BuildBatTest(unittest.TestCase):
         self.assertIn("--force-install", self.text)
         # Если свежий архив не скачался, лаунчер обязан сказать, куда положить файл.
         self.assertIn("csdk-cache", self.text)
+
+    def test_every_goto_and_call_target_exists(self) -> None:
+        """Ни один ``goto``/``call`` не должен вести в никуда (``:eof`` — встроенная метка)."""
+        import re
+
+        labels = {match.group(1).lower() for match in re.finditer(r"(?m)^\s*:([A-Za-z0-9_]+)\s*$", self.text)}
+        targets = {
+            match.group(1).lower()
+            for match in re.finditer(r"\b(?:goto|call)\s+:([A-Za-z0-9_]+)", self.text, re.IGNORECASE)
+        }
+        missing = sorted(targets - labels - {"eof"})
+        self.assertEqual([], missing, f"build.bat зовёт несуществующие метки: {missing}")
+
+    def test_one_log_file_is_shared_by_the_launcher_and_every_tool(self) -> None:
+        """Лаунчер, csdk_setup, build_mod и install_dmm пишут в один и тот же файл."""
+        self.assertIn('if /i "%~1"=="--log-file" set "LOG_FILE=%~2"', self.text)
+        self.assertIn('if /i "%~1"=="--log-dir" set "LOG_DIR=%~2"', self.text)
+        self.assertIn('if /i "%~1"=="--no-log-file" set "NO_LOG=1"', self.text)
+        self.assertIn('set "LOG_ARG=--log-file "%LOG_FILE%""', self.text)
+        self.assertIn('if defined LOG_ARG set "BUILD_ARGS=%BUILD_ARGS% %LOG_ARG%"', self.text)
+        self.assertIn('if defined LOG_ARG set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% %LOG_ARG%"', self.text)
+        for command in ("stage --open %GAME_ARG% %DIST_ARG% %LOG_ARG%",
+                        "direct %GAME_ARG% %DIST_ARG% %LOG_ARG%",
+                        "cfg %GAME_ARG% %LOG_ARG%",
+                        "verify %GAME_ARG% %DIST_ARG% %LOG_ARG%"):
+            self.assertIn(command, self.text, command)
+
+    def test_log_lives_next_to_the_mod_so_clean_cannot_delete_it(self) -> None:
+        """``--clean`` стирает dist; журнал должен это пережить."""
+        self.assertIn('if not defined LOG_DIR set "LOG_DIR=%MOD_DIR%\\logs"', self.text)
+        self.assertNotIn('set "BUILD_ARGS=%BUILD_ARGS% --clean"', self.text)
+
+    def test_log_file_is_finished_repaired_and_easy_to_find(self) -> None:
+        for label in (":make_log_file", ":log_header", ":logmsg", ":send_log_hint",
+                      ":finish_log", ":act_log"):
+            self.assertIn(label, self.text)
+        self.assertIn(r'copy /y "%LOG_FILE%" "%LOG_DIR%\latest.log"', self.text)
+        # cmd.exe пишет свои строки в OEM-кодировке: файл перекодируется в конце
+        self.assertIn(r'"%TOOLS_DIR%\trace_log.py" --repair "%LOG_FILE%"', self.text)
+        self.assertIn('if "%ANS%"=="6" goto :act_log', self.text)
+        self.assertIn("Full log of this run", self.text)
+        # ключевые факты лаунчера тоже попадают в файл
+        for fact in ('call :logmsg "python: %PY_CMD%"', 'call :logmsg "deadlock: %GAME_DIR%"',
+                     'call :logmsg "csdk: %CSDK_DIR%"', 'call :logmsg "build_mod.py exit code: %BUILD_RC%"'):
+            self.assertIn(fact, self.text, fact)
+        # справка не молчит про ключи журнала
+        self.assertIn("--trace              maximum detail", self.text)
+        self.assertIn("--no-log-file        do not write a log file", self.text)
+
+    def test_bat_documents_the_log_keys_of_the_builder(self) -> None:
+        """Ключи журнала объявлены один раз в tools/trace_log.py и подключены сборщиком."""
+        journal = (_support.MOD_ROOT / "tools" / "trace_log.py").read_text(encoding="utf-8")
+        for flag in ("--log-file", "--log-dir", "--no-log-file", "--quiet", "--trace"):
+            self.assertIn(f'"{flag}"', journal, flag)
+        builder = (_support.MOD_ROOT / "tools" / "build_mod.py").read_text(encoding="utf-8")
+        self.assertIn("trace_log.patch_cli(parser)", builder)
+        self.assertIn("trace_log.apply_cli(", builder)
+
+    def test_launcher_keeps_one_log_for_all_the_tools(self) -> None:
+        """Лаунчер, csdk_setup, build_mod и install_dmm пишут в один и тот же файл."""
+        self.assertIn('if /i "%~1"=="--log-file" set "LOG_FILE=%~2"', self.text)
+        self.assertIn('if /i "%~1"=="--log-dir" set "LOG_DIR=%~2"', self.text)
+        self.assertIn('if /i "%~1"=="--no-log-file" set "NO_LOG=1"', self.text)
+        self.assertIn('set "LOG_ARG=--log-file "%LOG_FILE%""', self.text)
+        self.assertIn('if defined LOG_ARG set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% %LOG_ARG%"', self.text)
+        self.assertIn('if defined LOG_ARG set "BUILD_ARGS=%BUILD_ARGS% %LOG_ARG%"', self.text)
+        for command in ("stage --open %GAME_ARG% %DIST_ARG% %LOG_ARG%",
+                        "direct %GAME_ARG% %DIST_ARG% %LOG_ARG%",
+                        "cfg %GAME_ARG% %LOG_ARG%",
+                        "verify %GAME_ARG% %DIST_ARG% %LOG_ARG%"):
+            self.assertIn(command, self.text, command)
+
+    def test_log_lives_outside_dist_so_clean_cannot_delete_it(self) -> None:
+        # --clean стирает dist\\ целиком, поэтому журнал кладётся в logs\\ рядом с модом
+        self.assertIn(r'if not defined LOG_DIR set "LOG_DIR=%MOD_DIR%\logs"', self.text)
+        self.assertIn(":make_log_file", self.text)
+
+    def test_log_file_is_finished_repaired_and_easy_to_find(self) -> None:
+        for label in (":log_header", ":logmsg", ":send_log_hint", ":finish_log", ":act_log"):
+            self.assertIn(label, self.text)
+        self.assertIn('>>"%LOG_FILE%" echo [launcher] %~1', self.text)
+        self.assertIn('copy /y "%LOG_FILE%" "%LOG_DIR%\\latest.log"', self.text)
+        # cmd.exe пишет свои строки в OEM-кодировке: файл перекодируется в конце
+        self.assertIn('"%TOOLS_DIR%\\trace_log.py" --repair "%LOG_FILE%"', self.text)
+        self.assertIn('if "%ANS%"=="6" goto :act_log', self.text)
+        self.assertIn("Full log of this run", self.text)
+        self.assertIn('call :logmsg "python: %PY_CMD%"', self.text)
+        self.assertIn('call :logmsg "build_mod.py exit code: %BUILD_RC%"', self.text)
+        self.assertIn('call :logmsg "menu after build: choice %ANS%"', self.text)
+
+    def test_help_tells_where_the_log_is_and_how_to_read_it(self) -> None:
+        for needle in ("--log-file FILE", "--log-dir DIR", "--no-log-file", "--trace",
+                       r"logs\build-YYYYMMDD-HHMMSS.log", r"logs\latest.log"):
+            self.assertIn(needle, self.text, needle)
+        self.assertNotIn(r"dist\logs", self.text)  # журнал живёт рядом с модом, а не в dist
+
+    def test_every_goto_and_call_target_exists(self) -> None:
+        """Опечатка в метке ломает батник молча: связи проверяются статически."""
+        import re
+
+        labels = {
+            match.group(1).lower()
+            for match in re.finditer(r"(?m)^\s*:([A-Za-z0-9_]+)\s*$", self.text)
+        }
+        targets = {
+            match.group(1).lower()
+            for match in re.finditer(r"(?i)\b(?:goto|call)\s+:([A-Za-z0-9_]+)", self.text)
+        }
+        missing = sorted(target for target in targets if target not in labels and target != "eof")
+        self.assertEqual([], missing, f"build.bat зовёт несуществующие метки: {missing}")
+
+    def test_builder_accepts_the_log_flags_too(self) -> None:
+        source = (_support.MOD_ROOT / "tools" / "trace_log.py").read_text(encoding="utf-8")
+        for flag in ("--log-file", "--log-dir", "--no-log-file", "--quiet", "--trace"):
+            self.assertIn(f'"{flag}"', source, flag)
+        builder = (_support.MOD_ROOT / "tools" / "build_mod.py").read_text(encoding="utf-8")
+        self.assertIn("trace_log.patch_cli(parser)", builder)
 
     def test_csdk_layouts_in_bat_match_the_builder(self) -> None:
         """build.bat обязан знать те же раскладки CSDK, что и tools/paths.py."""

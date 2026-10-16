@@ -637,7 +637,10 @@ class CliTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def _run(self, argv: list[str]) -> tuple[int, str, str]:
+    def _run(self, argv: list[str], *, log: bool = False) -> tuple[int, str, str]:
+        # По умолчанию журнал выключен: тесты не должны сорить в профиле
+        # пользователя (там лежит каталог установки CSDK по умолчанию).
+        argv = list(argv) if log else [*argv, "--no-log-file"]
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = csdk_setup.main(argv)
@@ -675,10 +678,27 @@ class CliTest(unittest.TestCase):
         root_file = self.tmp / "root.txt"
         done = run_cli(
             _support.TOOLS_DIR / "csdk_setup.py",
-            ["--csdk", str(installed), "--root-file", str(root_file)],
+            ["--csdk", str(installed), "--root-file", str(root_file), "--no-log-file"],
         )
         self.assertEqual(0, done.returncode, done.stdout + done.stderr)
         self.assertEqual(str(installed), root_file.read_text(encoding="utf-8").strip())
+
+    def test_journal_is_written_next_to_the_install_root(self) -> None:
+        """Журнал лежит там же, где распакован CSDK: его не надо искать в профиле."""
+        installed = self.tmp / "CSDK"
+        (installed / COMPILER_RELATIVE.parent).mkdir(parents=True)
+        (installed / COMPILER_RELATIVE).write_bytes(b"MZ")
+        target = self.tmp / "DeadlockModding" / "Reduced_CSDK_12"
+        code, out, err = self._run(
+            ["--csdk", str(installed), "--install-dir", str(target)], log=True
+        )
+        self.assertEqual(csdk_setup.EXIT_OK, code, out + err)
+        logs = sorted((self.tmp / "DeadlockModding" / "logs").glob("csdk-*.log"))
+        self.assertEqual(1, len(logs), logs)
+        text = logs[0].read_text(encoding="utf-8")
+        self.assertIn("Окружение", text)
+        self.assertIn("Журнал целиком", text)
+        self.assertTrue((logs[0].parent / "latest.log").is_file())
 
 
 class BuildIntegrationTest(unittest.TestCase):

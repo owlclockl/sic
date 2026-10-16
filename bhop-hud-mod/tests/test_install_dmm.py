@@ -23,9 +23,10 @@ MOD_ENTRIES = {
 
 
 def _run(args: list[str]) -> tuple[int, str]:
+    # --no-log-file: тесты не должны сорить журналами рядом с dist репозитория
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        code = install_dmm.main(args)
+        code = install_dmm.main([*args, "--no-log-file"])
     return code, buffer.getvalue()
 
 

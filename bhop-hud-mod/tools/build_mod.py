@@ -43,6 +43,14 @@
     python3 tools/build_mod.py --game-path "/mnt/games/Deadlock" --csdk "/home/me/csdk"
     python3 tools/build_mod.py --hud-xml /tmp/hud.xml --compiler-cmd "python3 fake.py ..."
     python3 tools/build_mod.py --steps prepare --allow-uncompiled --json
+
+Журнал: всё, что происходит, печатается в консоль и одновременно пишется в файл
+(``<каталог артефактов>/logs/build-<дата>-<время>.log``, рядом копия
+``latest.log``). Подробный режим включён по умолчанию; ``--quiet`` убирает мелочи,
+``--trace`` добавляет хеши файлов, полные листинги каталогов и дамп окружения,
+``--no-log-file`` оставляет только консоль. Файл журнала — это и есть то, что нужно
+отправить при разборе поломки: в нём есть окружение, команды целиком, их вывод,
+предупреждения и итог. Подробности — в ``tools/trace_log.py``.
 """
 
 from __future__ import annotations
@@ -67,6 +75,7 @@ import dmm_bundle  # noqa: E402
 import hud_patch  # noqa: E402
 import modinfo  # noqa: E402
 import paths as paths_mod  # noqa: E402
+import trace_log  # noqa: E402
 import vanilla_hud  # noqa: E402
 import vpk  # noqa: E402
 
@@ -74,7 +83,7 @@ TOOL = dmm_bundle.MANAGER_ID
 #: 1.2.0: базовый мод CSDK (game/citadel/gameinfo.gi) починяется на месте,
 #: `-game` перебирается от CSDK к дереву игры, отказ модуля `modtools`
 #: (`error 126`) больше не отправляет перекачивать CSDK, если ресурс записан.
-TOOL_VERSION = "1.2.0"
+TOOL_VERSION = "1.3.0"
 
 MOD_TITLE = "Deadlock :: Bhop Trainer HUD"
 MOD_AUTHOR = "owlclockl"
@@ -130,9 +139,13 @@ _LOG_TO_STDERR = False
 
 
 def log(message: str) -> None:
-    # sys.stdout/sys.stderr берём в момент вызова, а не при импорте: так работает
-    # и перенаправление вывода в тестах, и запуск из другого скрипта.
-    print(message, file=sys.stderr if _LOG_TO_STDERR else sys.stdout, flush=True)
+    """Строка журнала: консоль (stdout, а с --json — stderr) и файл сразу.
+
+    Поток берётся в момент вызова, а не при импорте: так работает и
+    перенаправление вывода в тестах, и запуск из другого скрипта. Файл журнала
+    подключает :mod:`trace_log`; без него всё это просто идёт в консоль.
+    """
+    trace_log.current().log(message)
 
 
 @dataclass
@@ -191,12 +204,14 @@ class Context:
         return bool(self.state.get("uncompiled"))
 
     def note(self, message: str) -> None:
+        """Подробность сборки: в отчёт, в консоль и в файл журнала."""
         self.notes.append(message)
-        log(f"  · {message}")
+        trace_log.detail("· " + message)
 
     def warn(self, message: str) -> None:
+        """Предупреждение: в отчёт, в журнал и в итоговый список проблем."""
         self.warnings.append(message)
-        log(f"  ! {message}")
+        trace_log.warn(message)
 
 
 # --------------------------------------------------------------------------- #
@@ -217,6 +232,10 @@ def step_prepare(ctx: Context) -> None:
     styles = ctx.styles_path.read_text(encoding="utf-8")
     ctx.state["snippet_sha256"] = vpk.sha256_of(snippet.encode("utf-8"))
     ctx.state["styles_sha256"] = vpk.sha256_of(styles.encode("utf-8"))
+    trace_log.detail(f"панель мода: {trace_log.describe(ctx.snippet_path)}")
+    trace_log.detail(f"стили мода: {trace_log.describe(ctx.styles_path)}")
+    trace_log.kv("исходники панели", f"{len(snippet)} символов, sha256 {ctx.state['snippet_sha256'][:16]}…")
+    trace_log.kv("исходники стилей", f"{len(styles)} символов, sha256 {ctx.state['styles_sha256'][:16]}…")
 
     hud_xml_arg = Path(ctx.args.hud_xml) if ctx.args.hud_xml else None
     game_dir = ctx.args.game_dir
@@ -276,6 +295,8 @@ def step_prepare(ctx: Context) -> None:
             ctx.note(message)
     ctx.state["hud_patched_sha256"] = vpk.sha256_of(patched.text.encode("utf-8"))
 
+    trace_log.kv("патч hud.xml", "уже был применён" if patched.already_patched else "применён")
+    trace_log.kv("sha256 пропатченного hud.xml", ctx.state["hud_patched_sha256"])
     layout_dir = ctx.content_root / "panorama" / "layout"
     styles_dir = ctx.content_root / "panorama" / "styles"
     layout_dir.mkdir(parents=True, exist_ok=True)
@@ -390,11 +411,17 @@ def _resolve_compiler(ctx: Context) -> _CompilerResolver:
         )
     csdk = paths_mod.find_csdk(Path(args.csdk) if args.csdk else None)
     if csdk is None:
+        trace_log.decision(
+            "какой компилятор использовать", "нет",
+            "paths.find_csdk не нашёл resourcecompiler.exe ни в --csdk, ни в "
+            "переменных окружения, ни в типичных местах",
+        )
         return _CompilerResolver(
             compiler=None, sdk=None, game_dir=None,
             content_root=ctx.content_root, output_root=ctx.output_root,
         )
     compiler = paths_mod.csdk_compiler(csdk)
+    trace_log.decision("какой компилятор использовать", compiler, f"нашёлся в корне CSDK {csdk}")
     return _CompilerResolver(
         compiler=compiler,
         sdk=csdk,
@@ -410,7 +437,11 @@ def _existing_gameinfo(sdk: Path | None) -> Path | None:
     if sdk is None:
         return None
     gameinfo = paths_mod.csdk_gameinfo(sdk)
-    return gameinfo if gameinfo.is_file() else None
+    if gameinfo.is_file():
+        trace_log.kv("базовый мод CSDK", trace_log.describe(gameinfo))
+        return gameinfo
+    trace_log.kv("базовый мод CSDK", f"нет ({gameinfo})")
+    return None
 
 
 def _compiled_roots(
@@ -497,6 +528,43 @@ def _fallback_game_dir(ctx: Context) -> Path | None:
         if (citadel / "gameinfo.gi").is_file():
             return citadel
     return None
+
+
+def _describe_csdk_for_log(resolver: "_CompilerResolver") -> None:
+    """Подробно записать в журнал, что за CSDK достался сборке.
+
+    Это тот раздел, по которому разбирается ``Unable to load module modtools ...
+    error 126``: видно, какие наборы бинарников есть, лежит ли базовый мод, какие
+    файлы модулей инструментов лежат рядом с компилятором и каких DLL из Visual
+    C++ Redistributable не хватает системе.
+    """
+    sdk = resolver.sdk
+    if sdk is None:
+        return
+    layout = paths_mod.csdk_layout(sdk)
+    trace_log.kv("раскладка CSDK", layout.describe())
+    trace_log.kv("базовый мод game/citadel/gameinfo.gi", layout.gameinfo or "нет")
+    trace_log.kv("каталоги бинарников", layout.bin_dirs or "не найдены")
+    trace_log.kv(
+        "файлы модулей инструментов",
+        ", ".join(path.name for path in layout.module_files) or "не найдены",
+    )
+    if resolver.compiler is not None:
+        trace_log.kv("компилятор", trace_log.describe(resolver.compiler))
+        trace_log.list_dir(resolver.compiler.parent, note="каталог компилятора")
+    for directory in layout.bin_dirs:
+        if resolver.compiler is None or directory != resolver.compiler.parent:
+            trace_log.list_dir(directory, note="набор бинарников CSDK", limit=60)
+    missing_runtime = paths_mod.missing_vc_runtime_dlls()
+    if missing_runtime:
+        trace_log.warn(
+            "в System32 нет DLL из Microsoft Visual C++ Redistributable: "
+            + ", ".join(missing_runtime)
+            + ". Поставь «Visual C++ Redistributable 2015-2022 (x64)» — без него модуль "
+              "инструментов CSDK не загружается (это и есть error 126)."
+        )
+    else:
+        trace_log.detail("DLL Visual C++ Redistributable (vcruntime140, msvcp140): на месте")
 
 
 def _installed_gameinfo(ctx: Context) -> Path | None:
@@ -593,11 +661,19 @@ def _compile_attempts(ctx: Context, resolver: "_CompilerResolver") -> list[_Comp
 
 
 def _run_compiler(ctx: Context, command: list[str], resolver: "_CompilerResolver") -> "subprocess.CompletedProcess[str]":
-    return subprocess.run(
+    """Запустить компилятор, записав в журнал команду, каталог и весь его вывод.
+
+    Полный вывод здесь принципиален: ``resourcecompiler`` печатает сотни строк
+    предупреждений, и решающая строка («Unable to load module modtools ... error
+    126» или «Can't find 'game\\citadel\\gameinfo.gi'») тонет в них. В журнале
+    она есть целиком, а при ошибке туда же попадает содержимое каталога с
+    компилятором и список его модулей — по нему видно, чего не хватает.
+    """
+    return trace_log.run(
         command,
-        cwd=str(resolver.compiler.parent) if resolver.compiler else None,
-        capture_output=True,
-        text=True,
+        cwd=resolver.compiler.parent if resolver.compiler else None,
+        note=f"resourcecompiler ({resolver.compiler.name if resolver.compiler else 'своя команда'})",
+        list_dir_on_failure=True,
     )
 
 
@@ -898,6 +974,14 @@ def step_compile(ctx: Context) -> None:
             )
     _note_attempts(ctx, attempts, resolver)
     ctx.state["compile_attempts"] = [attempt.label for attempt in attempts]
+    _describe_csdk_for_log(resolver)
+    trace_log.detail(f"исходников к компиляции: {len(sources)} (файлов в дереве аддона)")
+    for source in sources:
+        trace_log.trace(f"  исходник: {source.relative_to(ctx.content_root).as_posix()} — "
+                        f"{trace_log.human_bytes(source.stat().st_size)}, sha256 {trace_log.file_sha256(source)}")
+    trace_log.detail("порядок попыток компиляции:")
+    for index, attempt in enumerate(attempts, start=1):
+        trace_log.detail(f"  {index}. {attempt.label}: -game {attempt.game if attempt.game else 'не передаётся'}")
 
     roots = _compiled_roots(ctx, resolver, game_dir=game_dir)
     # Снимок «до компиляции»: по нему отличаем свежий вывод от чужого файла с тем же именем.
@@ -913,6 +997,10 @@ def step_compile(ctx: Context) -> None:
         relative = source.relative_to(ctx.content_root)
         expected_ext = COMPILED_EXTENSIONS.get(relative.suffix.lower())
         started = time.time()
+        trace_log.detail(
+            f"компилирую {relative.as_posix()}: {trace_log.human_bytes(source.stat().st_size)}, "
+            f"ожидаемый ресурс {expected_ext or '<не компилируется>'}"
+        )
         result, command, used = _compile_one(ctx, source, relative, resolver, attempts)
         if result.returncode != 0:
             salvaged = _salvage_after_module_error(
@@ -1101,6 +1189,7 @@ def _take_compiled(
             # Файл старше этого запуска (запас 2 с — на гранулярность ФС): не наш.
             continue
         found = candidate
+        trace_log.detail(f"ресурс найден в «{root.label}»: {trace_log.describe(candidate)}")
         if candidate != target:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(candidate, target)
@@ -1119,6 +1208,8 @@ def _take_compiled(
             "возможно, компиляция его не обновила"
         )
     ctx.note(f"скомпилировано: {_rel(target, ctx.build_dir)} ({target.stat().st_size} Б)")
+    trace_log.path_event("ресурс готов", target, size=target.stat().st_size,
+                         sha256=vpk.sha256_of_file(target))
     return target
 
 
@@ -1138,15 +1229,22 @@ def _remove_quietly(path: Path, *, stop_at: Path) -> None:
 
 
 def _copy_tree(source: Path, destination: Path) -> None:
+    """Скопировать дерево файлов (с журналом: сколько и куда)."""
     if destination.exists():
         shutil.rmtree(destination)
     destination.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    total = 0
     for path in sorted(source.rglob("*")):
         if not path.is_file():
             continue
         target = destination / path.relative_to(source)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
+        copied += 1
+        total += target.stat().st_size
+        trace_log.trace(f"  скопирован {path.relative_to(source).as_posix()} -> {target}")
+    trace_log.detail(f"копирую дерево: {copied} файл(ов), {trace_log.human_bytes(total)}: {source} -> {destination}")
 
 
 def _pack_source_tree(ctx: Context) -> Path:
@@ -1203,6 +1301,10 @@ def step_pack(ctx: Context) -> None:
             payloads[path.relative_to(tree_root).as_posix()] = path.read_bytes()
     if not payloads:
         raise SystemExit("нечего паковать: дерево аддона пустое")
+    trace_log.detail(f"пакую дерево {tree_root}")
+    for name, data in sorted(payloads.items()):
+        trace_log.detail(f"  {name} — {trace_log.human_bytes(len(data))}")
+        trace_log.trace(f"    sha256 {trace_log.sha256_of(data)}")
 
     raw = vpk.build_vpk(payloads)
     problems = vpk.verify_vpk(raw, payloads)
@@ -1290,6 +1392,8 @@ def step_dmm(ctx: Context) -> None:
     if problems:
         raise SystemExit("пакет для DMM не прошёл проверку:\n  - " + "\n  - ".join(problems))
     ctx.note(f"пакет: {_rel(ctx.bundle_dir, ctx.root)}/{manifest.name}")
+    trace_log.list_dir(ctx.bundle_dir, note="пакет для Deadlock Mod Manager")
+    trace_log.kv("файлов в пакете", len(document["mods"][0]["files"]))
 
     dmm_bundle.write_zip(ctx.zip_path, ctx.bundle_dir, notes=_install_notes(ctx))
     ctx.state["bundle"] = _rel(ctx.bundle_dir, ctx.root)
@@ -1304,17 +1408,28 @@ def step_report(ctx: Context) -> None:
     log("[report] отчёт и контрольные суммы")
     ctx.state["report_written"] = True
     ctx.out_dir.mkdir(parents=True, exist_ok=True)
+    # Журналы сборки растут прямо во время сборки (и могут лежать хоть в
+    # самом dist -- по --log-file): их хеш ничего не значит, в контрольные
+    # суммы и в список артефактов они не попадают.
     artifacts = [
         path for path in sorted(ctx.out_dir.rglob("*"))
         if path.is_file() and path.name not in ("BUILD_REPORT.md", "SHA256SUMS.txt")
+        and path.suffix.lower() != ".log"
+        and "logs" not in path.relative_to(ctx.out_dir).parts
     ]
     lines = [f"{vpk.sha256_of_file(path)}  {_rel(path, ctx.out_dir)}" for path in artifacts]
     (ctx.out_dir / "SHA256SUMS.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    trace_log.detail(f"контрольные суммы: {len(artifacts)} файл(ов) -> {ctx.out_dir / 'SHA256SUMS.txt'}")
     ctx.state["artifacts"] = {_rel(path, ctx.out_dir): vpk.sha256_of_file(path) for path in artifacts}
 
     report = _render_report(ctx)
     (ctx.out_dir / "BUILD_REPORT.md").write_text(report, encoding="utf-8")
     ctx.note(f"отчёт: {_rel(ctx.out_dir / 'BUILD_REPORT.md', ctx.root)}")
+    trace_log.detail(f"отчёт: {len(report)} символов, {report.count(chr(10)) + 1} строк")
+    for path in artifacts:
+        trace_log.detail(
+            f"  артефакт: {_rel(path, ctx.out_dir)} — {trace_log.human_bytes(path.stat().st_size)}"
+        )
     _write_state(ctx)
 
 
@@ -1355,9 +1470,11 @@ def _write_state(ctx: Context) -> None:
         "warnings": ctx.warnings,
         **{key: value for key, value in ctx.state.items() if key != "bundle_summary"},
     }
-    (ctx.build_dir / "build_state.json").write_text(
+    state_file = ctx.build_dir / "build_state.json"
+    state_file.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    trace_log.kv("состояние сборки", f"{state_file} ({state_file.stat().st_size} Б)")
 
 
 def _install_notes(ctx: Context) -> str:
@@ -1654,6 +1771,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clean", action="store_true",
                         help="собрать с нуля: удалить build/ и каталог артефактов перед стартом")
     parser.add_argument("--json", action="store_true", help="напечатать итог в JSON")
+    trace_log.patch_cli(parser)
     return parser
 
 
@@ -1679,7 +1797,16 @@ def _ensure_csdk(ctx: Context) -> None:
     """
     args = ctx.args
     if args.compiler_cmd or args.allow_uncompiled:
+        trace_log.detail(
+            "шаг поиска CSDK пропущен: "
+            + ("задана своя команда компиляции (--compiler-cmd)" if args.compiler_cmd
+               else "сборка без компилятора (--allow-uncompiled)")
+        )
         return  # компилятор подменили или сборка и так «только исходники»
+    trace_log.detail("ищу CSDK: --csdk → переменные окружения → типичные места → автоустановка")
+    trace_log.kv("--csdk", args.csdk or "не задан")
+    trace_log.kv("--csdk-install-dir", args.csdk_install_dir or "по умолчанию")
+    trace_log.kv("--csdk-url", args.csdk_url or "по умолчанию (страница CSDK 12)")
     csdk_setup.set_progress_stream(sys.stderr if _LOG_TO_STDERR else sys.stdout)
     result = csdk_setup.ensure_csdk(
         explicit=args.csdk,
@@ -1693,6 +1820,7 @@ def _ensure_csdk(ctx: Context) -> None:
         log=log,
     )
     ctx.state["csdk_status"] = result.status
+    trace_log.kv("итог поиска CSDK", f"статус {result.status}, корень {result.root}, компилятор {result.compiler}")
     if result.ok:
         # Дальше все шаги работают с ним как с обычным, явно указанным CSDK.
         args.csdk = str(result.root)
@@ -1705,6 +1833,30 @@ def _ensure_csdk(ctx: Context) -> None:
             ctx.warn(message)
 
 
+def _dump_args(args: argparse.Namespace) -> None:
+    """Записать в журнал все параметры запуска — со значениями по умолчанию.
+
+    Когда разбираешь чужую сборку, половина вопросов («а --csdk был задан?», «а
+    шаги какие?») снимается именно этим списком.
+    """
+    trace_log.detail("параметры запуска (в скобках — что пришло, если отличается от умолчания):")
+    for name in sorted(vars(args)):
+        trace_log.detail(f"  {name} = {getattr(args, name)!r}")
+
+
+def _status_text(exit_code: int, ctx: "Context") -> str:
+    """Человеческий статус сборки для итогового блока журнала."""
+    if exit_code == EXIT_OK:
+        if ctx.sources_only:
+            return "собрано «только исходники» — в игре не заработает"
+        return "готово: VPK и пакет для Deadlock Mod Manager собраны"
+    if exit_code == EXIT_NEEDS_COMPILE:
+        return "остановлено: нужен CSDK с resourcecompiler.exe (компиляция не выполнялась)"
+    if exit_code == 130:
+        return "прервано пользователем"
+    return "ошибка сборки (подробности выше)"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     global _LOG_TO_STDERR
@@ -1714,10 +1866,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     out_dir = Path(args.out).resolve() if args.out else root / "dist"
     build_dir = Path(args.build_dir).resolve() if args.build_dir else root / "build"
 
+    # Сначала чистим каталоги, потом открываем журнал: иначе --clean удалил бы
+    # файл журнала, который к этому моменту уже открыт (на Windows это вообще
+    # отказ удаления), и отправлять при разборе было бы нечего.
+    cleaned: list[str] = []
     if args.clean:
-        log("[clean] собираю с нуля: удаляю рабочие каталоги")
-        _wipe_dir(build_dir)
-        _wipe_dir(out_dir)
+        for directory in (build_dir, out_dir):
+            if directory.is_dir():
+                cleaned.append(str(directory))
+                _wipe_dir(directory)
+
+    # Свежий журнал на каждый запуск: консоль + файл (по умолчанию <out>/logs).
+    trace_log.reset()
+    journal = trace_log.apply_cli(
+        args,
+        default_dir=out_dir / "logs",
+        prefix="build",
+        to_stderr=bool(args.json),
+        header=f"Сборка мода {args.addon_name} v{args.version} — Deadlock :: Bhop Trainer HUD",
+    )
+    journal.snapshot(extra={
+        "версия сборщика": f"{TOOL_VERSION} ({TOOL})",
+        "каталог мода": root,
+        "каталог артефактов": out_dir,
+        "рабочий каталог сборки": build_dir,
+        "этапы": args.steps,
+    })
+    _dump_args(args)
 
     ctx = Context(root=root, out_dir=out_dir, build_dir=build_dir,
                   addon_name=args.addon_name, version=args.version, args=args)
@@ -1725,69 +1900,135 @@ def main(argv: Sequence[str] | None = None) -> int:
     steps: list[str] = []
     exit_code = EXIT_OK
     try:
-        _validate_addon_name(args.addon_name)
-        steps = [step.strip() for step in args.steps.split(",") if step.strip()]
-        unknown = [step for step in steps if step not in STEPS]
-        if unknown:
-            raise SystemExit(f"неизвестные шаги: {', '.join(unknown)} (доступны: {', '.join(STEPS)})")
-
-        args.game_dir = paths_mod.find_game_dir(Path(args.game_path)) if not args.hud_xml else None
-
-        log(f"Автосборка {args.addon_name} v{args.version}")
-        for step in steps:
-            STEPS[step](ctx)
-    except _NeedsCompile as error:
-        ctx.warn(str(error))
-        exit_code = EXIT_NEEDS_COMPILE
-    except KeyboardInterrupt:
-        log("прервано пользователем")
-        return 130
-    except SystemExit as error:
-        message = getattr(error, "code", None) or str(error)
-        if isinstance(message, str):
-            log(f"ОШИБКА: {message}")
-            ctx.errors.append(message)
-        exit_code = EXIT_ERROR
-    except FileNotFoundError as error:
-        log(f"ОШИБКА: {error}")
-        ctx.errors.append(str(error))
-        exit_code = EXIT_ERROR
-    except (vpk.VpkError, modinfo.ModInfoError, hud_patch.HudPatchError,
-            dmm_bundle.BundleError, OSError, ValueError) as error:
-        log(f"ОШИБКА: {error}")
-        ctx.errors.append(str(error))
-        exit_code = EXIT_ERROR
-
-    # Отчёт нужен всегда, когда сборка дошла хоть до чего-то значимого — в том
-    # числе при остановке на компиляции или ошибке. Если шаг уже отработал —
-    # второй раз не пишем.
-    if not ctx.state.get("report_written") and (
-        ctx.state.get("vpk") or ctx.errors or exit_code == EXIT_NEEDS_COMPILE
-    ):
         try:
-            step_report(ctx)
-        except OSError as error:
-            log(f"не удалось записать отчёт: {error}")
+            if cleaned:
+                log("[clean] собираю с нуля: удаляю рабочие каталоги")
+                trace_log.detail("удалено до старта: " + ", ".join(cleaned))
 
-    if ctx.errors:
-        exit_code = EXIT_ERROR
+            _validate_addon_name(args.addon_name)
+            steps = [step.strip() for step in args.steps.split(",") if step.strip()]
+            unknown = [step for step in steps if step not in STEPS]
+            if unknown:
+                raise SystemExit(f"неизвестные шаги: {', '.join(unknown)} (доступны: {', '.join(STEPS)})")
 
-    if args.json:
-        print(json.dumps(
-            {
-                "status": {EXIT_OK: "ok", EXIT_NEEDS_COMPILE: "needs-compile", EXIT_ERROR: "error"}[exit_code],
-                "version": ctx.version,
-                "addon": ctx.addon_name,
-                "sourcesOnly": ctx.sources_only,
-                "state": ctx.state,
-                "warnings": ctx.warnings,
-                "errors": ctx.errors,
-            },
-            indent=2, ensure_ascii=False,
-        ))
-    elif exit_code == EXIT_OK:
-        log("готово.")
+            trace_log.detail("ищу установленный Deadlock (нужен ванильный hud.xml)")
+            args.game_dir = paths_mod.find_game_dir(Path(args.game_path)) if not args.hud_xml else None
+            if args.hud_xml:
+                trace_log.decision("каталог игры", "--hud-xml задан", "ванильный файл берётся явно, игра не нужна")
+            elif args.game_dir:
+                trace_log.decision("каталог игры", args.game_dir, "там есть game/citadel/gameinfo.gi")
+            else:
+                trace_log.decision(
+                    "каталог игры", "не найден",
+                    "ванильный hud.xml будет взят из кэша, файла рядом или зеркала депо",
+                )
+
+            log(f"Автосборка {args.addon_name} v{args.version}")
+            for step in steps:
+                started = time.monotonic()
+                trace_log.section(f"шаг {step}")
+                STEPS[step](ctx)
+                trace_log.detail(f"шаг {step} выполнен за {time.monotonic() - started:.3f} с")
+        except _NeedsCompile as error:
+            ctx.warn(str(error))
+            exit_code = EXIT_NEEDS_COMPILE
+        except KeyboardInterrupt:
+            log("прервано пользователем")
+            trace_log.warn("сборка прервана пользователем (Ctrl+C)")
+            exit_code = 130
+        except SystemExit as error:
+            message = getattr(error, "code", None) or str(error)
+            if isinstance(message, str):
+                log(f"ОШИБКА: {message}")
+                ctx.errors.append(message)
+                trace_log.error(message)
+            exit_code = EXIT_ERROR
+        except FileNotFoundError as error:
+            log(f"ОШИБКА: {error}")
+            ctx.errors.append(str(error))
+            trace_log.exception(error, where="шаг сборки")
+            exit_code = EXIT_ERROR
+        except (vpk.VpkError, modinfo.ModInfoError, hud_patch.HudPatchError,
+                dmm_bundle.BundleError, OSError, ValueError) as error:
+            log(f"ОШИБКА: {error}")
+            ctx.errors.append(str(error))
+            trace_log.exception(error, where="шаг сборки")
+            exit_code = EXIT_ERROR
+        except Exception as error:  # noqa: BLE001 - неожиданное тоже должно попасть в журнал
+            log(f"ОШИБКА: непредвиденная ошибка {type(error).__name__}: {error}")
+            ctx.errors.append(f"{type(error).__name__}: {error}")
+            trace_log.exception(error, where="шаг сборки (непредвиденная)")
+            exit_code = EXIT_ERROR
+
+        # Отчёт нужен всегда, когда сборка дошла хоть до чего-то значимого — в том
+        # числе при остановке на компиляции или ошибке. Если шаг уже отработал —
+        # второй раз не пишем.
+        if not ctx.state.get("report_written") and (
+            ctx.state.get("vpk") or ctx.errors or exit_code == EXIT_NEEDS_COMPILE
+        ):
+            try:
+                step_report(ctx)
+            except OSError as error:
+                log(f"не удалось записать отчёт: {error}")
+                trace_log.exception(error, where="запись отчёта")
+
+        if ctx.errors:
+            exit_code = EXIT_ERROR
+
+        if args.json:
+            print(json.dumps(
+                {
+                    "status": {EXIT_OK: "ok", EXIT_NEEDS_COMPILE: "needs-compile", EXIT_ERROR: "error"}[exit_code],
+                    "version": ctx.version,
+                    "addon": ctx.addon_name,
+                    "sourcesOnly": ctx.sources_only,
+                    "state": ctx.state,
+                    "warnings": ctx.warnings,
+                    "errors": ctx.errors,
+                },
+                indent=2, ensure_ascii=False,
+            ))
+        elif exit_code == EXIT_OK:
+            log("готово.")
+    finally:
+        _finish_journal(ctx, exit_code)
     return exit_code
+
+
+def _finish_journal(ctx: Context, exit_code: int) -> None:
+    """Итоговый блок журнала и закрытие файла (вызывается всегда)."""
+    try:
+        artifacts: list[Path] = []
+        for key in ("vpk", "bundle_zip", "bundle"):
+            value = ctx.state.get(key)
+            if value:
+                artifacts.append(ctx.root / value)
+        report = ctx.out_dir / "BUILD_REPORT.md"
+        if report.is_file():
+            artifacts.append(report)
+        for name in ("bhop_trainer_dir.vpk",):
+            candidate = ctx.out_dir / name
+            if candidate.is_file() and candidate not in artifacts:
+                artifacts.append(candidate)
+
+        journal = trace_log.current()
+        extra = [f"каталог артефактов: {ctx.out_dir}"]
+        if ctx.errors:
+            extra.append("первая ошибка: " + str(ctx.errors[0]).splitlines()[0])
+        extra.append(f"компилятор: {ctx.state.get('csdk_compiler') or 'не использовался'}")
+        if ctx.state.get("csdk_root"):
+            extra.append(f"CSDK: {ctx.state['csdk_root']}")
+        journal.summary(
+            status=_status_text(exit_code, ctx),
+            artifacts=artifacts,
+            extra=extra,
+        )
+        if exit_code != EXIT_OK:
+            journal.info("Если будешь писать автору сборщика — отправь этот журнал целиком:")
+            journal.info(f"  {journal.log_path or '<консоль>'}")
+            journal.info("Он содержит окружение, команды и их вывод, предупреждения и итог.")
+    finally:
+        trace_log.shutdown()
 
 
 if __name__ == "__main__":
