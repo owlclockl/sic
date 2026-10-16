@@ -995,16 +995,23 @@ def step_compile(ctx: Context) -> None:
     produced: list[Path] = []
     for source in sources:
         relative = source.relative_to(ctx.content_root)
+        # Компилируем копию исходника в дереве CSDK, а не оригинал из build/: иначе
+        # resourcecompiler не видит базовый мод CSDK (game/citadel/gameinfo.gi) и
+        # падает на «FS: Tried to FileExists NULL filename!» / отсутствии gameinfo.
+        # В режиме своей команды (--compiler-cmd) копии нет — берём исходник как есть.
+        compile_source = source
+        if resolver.content_root != ctx.content_root and (resolver.content_root / relative).is_file():
+            compile_source = resolver.content_root / relative
         expected_ext = COMPILED_EXTENSIONS.get(relative.suffix.lower())
         started = time.time()
         trace_log.detail(
-            f"компилирую {relative.as_posix()}: {trace_log.human_bytes(source.stat().st_size)}, "
+            f"компилирую {relative.as_posix()}: {trace_log.human_bytes(compile_source.stat().st_size)}, "
             f"ожидаемый ресурс {expected_ext or '<не компилируется>'}"
         )
-        result, command, used = _compile_one(ctx, source, relative, resolver, attempts)
+        result, command, used = _compile_one(ctx, compile_source, relative, resolver, attempts)
         if result.returncode != 0:
             salvaged = _salvage_after_module_error(
-                ctx, source, relative, resolver, expected_ext, roots, before, result, started
+                ctx, compile_source, relative, resolver, expected_ext, roots, before, result, started
             )
             if salvaged is None:
                 message = _compiler_failure_message(ctx, relative, result, command, attempts, resolver)
@@ -1030,7 +1037,7 @@ def step_compile(ctx: Context) -> None:
             ctx.state["compiler_game"] = str(used.game)
         if expected_ext is None:
             continue
-        produced.append(_take_compiled(ctx, relative, expected_ext, roots, before, source))
+        produced.append(_take_compiled(ctx, relative, expected_ext, roots, before, compile_source))
 
     if not produced:
         raise SystemExit("компиляция не дала ни одного ресурса")
