@@ -39,6 +39,7 @@ def _run(argv: list[str], keep_streams_separate: bool = False) -> tuple[int, str
 
 class PipelineCase(unittest.TestCase):
     def setUp(self) -> None:
+        _support.block_network(self)  # тесты не ходят в сеть: ссылки подставляются явно
         self._tmp = TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
         self.out = self.tmp / "dist"
@@ -290,7 +291,10 @@ class FailureTest(PipelineCase):
         empty_game = self.tmp / "empty-game"
         (empty_game / "game" / "citadel").mkdir(parents=True)
         (empty_game / "game" / "citadel" / "gameinfo.gi").write_text("// empty\n", encoding="utf-8")
-        code, output = _run(["--game-path", str(empty_game), "--out", str(self.out), "--build-dir", str(self.build)])
+        code, output = _run([
+            "--game-path", str(empty_game), "--no-hud-download",
+            "--out", str(self.out), "--build-dir", str(self.build),
+        ])
         self.assertEqual(build_mod.EXIT_ERROR, code, output)
         self.assertIn("hud.xml", output)
 
@@ -303,6 +307,128 @@ class FailureTest(PipelineCase):
         code, output = _run(["--addon-name", "Bad-Name", "--hud-xml", str(HUD_FIXTURE)])
         self.assertEqual(build_mod.EXIT_ERROR, code, output)
         self.assertIn("addon-name", output)
+
+
+class HudSourceChainTest(PipelineCase):
+    """Ванильный hud.xml: в паках игры исходника нет — сборщик берёт его отдельно.
+
+    Настоящая игра кладёт в ``pak01_dir.vpk`` только скомпилированный
+    ``panorama/layout/hud.xml`` → ``hud.vxml_c``, поэтому проверяем и загрузку с
+    зеркала (через ``file://`` — тесты не ходят в сеть), и работу с кэшем.
+    """
+
+    def _mirror_url(self, name: str = "mirror-hud.xml", content: bytes | None = None) -> str:
+        path = self.tmp / name
+        path.write_bytes(content if content is not None else HUD_FIXTURE.read_bytes())
+        return path.as_uri()
+
+    def test_downloads_hud_when_paks_have_only_compiled(self) -> None:
+        game = write_fake_game(self.tmp / "Deadlock", compiled_only=True, build_id="6785")
+        url = self._mirror_url()
+        code, output = _run([
+            "--game-path", str(game),
+            "--hud-xml-url", url,
+            "--compiler-cmd", COMPILER_CMD_TEMPLATE,
+            "--out", str(self.out), "--build-dir", str(self.build),
+        ])
+        self.assertEqual(0, code, output)
+        state = json.loads((self.build / "build_state.json").read_text(encoding="utf-8"))
+        self.assertEqual("download", state["hud_source_origin"])
+        self.assertEqual(url, state["hud_source_url"])
+        self.assertIn("зеркало депо", state["hud_source_label"])
+        self.assertEqual("6785", state["hud_game_build_id"])
+        report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("download", report)
+        self.assertIn(url, report)
+
+    def test_loose_vanilla_file_is_used_without_any_download(self) -> None:
+        from _support import write_loose_hud
+
+        game = write_fake_game(self.tmp / "Deadlock", compiled_only=True, build_id="6785")
+        write_loose_hud(game, HUD_FIXTURE.read_bytes())
+        code, output = _run([
+            "--game-path", str(game),
+            "--hud-xml-url", "https://mirror.invalid/hud.xml",  # обращаться нельзя: файл локальный
+            "--no-hud-download",
+            "--compiler-cmd", COMPILER_CMD_TEMPLATE,
+            "--out", str(self.out), "--build-dir", str(self.build),
+        ])
+        self.assertEqual(0, code, output)
+        state = json.loads((self.build / "build_state.json").read_text(encoding="utf-8"))
+        self.assertEqual("loose", state["hud_source_origin"])
+
+    def test_explicit_url_wins_over_no_hud_download(self) -> None:
+        game = write_fake_game(self.tmp / "Deadlock", compiled_only=True, build_id="6785")
+        url = self._mirror_url("pinned-hud.xml")
+        code, output = _run([
+            "--game-path", str(game),
+            "--hud-xml-url", url,
+            "--no-hud-download",  # явная ссылка важнее: качать запрещено, но файл ждут оттуда
+            "--compiler-cmd", COMPILER_CMD_TEMPLATE,
+            "--out", str(self.out), "--build-dir", str(self.build),
+        ])
+        self.assertEqual(0, code, output)
+        self.assertIn("файл берётся по этой ссылке", output)
+        state = json.loads((self.build / "build_state.json").read_text(encoding="utf-8"))
+        self.assertEqual("download", state["hud_source_origin"])
+        self.assertEqual(url, state["hud_source_url"])
+
+    def test_loose_shadow_is_reported_as_a_warning(self) -> None:
+        from _support import write_loose_hud
+
+        game = write_fake_game(self.tmp / "Deadlock", compiled_only=True, build_id="6785")
+        write_loose_hud(game, HUD_FIXTURE.read_bytes())
+        code, output = _run([
+            "--game-path", str(game), "--no-hud-download",
+            "--compiler-cmd", COMPILER_CMD_TEMPLATE,
+            "--out", str(self.out), "--build-dir", str(self.build),
+        ])
+        self.assertEqual(0, code, output)
+        self.assertIn("патч другого мода", output)
+        report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("патч другого мода", report)
+
+    def test_cached_hud_is_reused_on_second_run(self) -> None:
+        game = write_fake_game(self.tmp / "Deadlock", compiled_only=True, build_id="6785")
+        url = self._mirror_url()
+        args = [
+            "--game-path", str(game), "--hud-xml-url", url,
+            "--compiler-cmd", COMPILER_CMD_TEMPLATE,
+            "--out", str(self.out), "--build-dir", str(self.build),
+        ]
+        code, output = _run(args)
+        self.assertEqual(0, code, output)
+        self.assertIn("скачан", output)
+        first = vpk.open_vpk(self.out / "bhop_trainer_dir.vpk")
+        first_entries = first.list_entries()
+        first_layout = first.extract("panorama/layout/hud.vxml_c")
+
+        # второй запуск: файл берётся из кэша, содержимое мода — то же самое
+        (self.tmp / "mirror-hud.xml").unlink()
+        code, output = _run(args)
+        self.assertEqual(0, code, output)
+        self.assertIn("из кэша", output)
+        second = vpk.open_vpk(self.out / "bhop_trainer_dir.vpk")
+        self.assertEqual(first_entries, second.list_entries())
+        self.assertEqual(first_layout, second.extract("panorama/layout/hud.vxml_c"))
+        state = json.loads((self.build / "build_state.json").read_text(encoding="utf-8"))
+        self.assertEqual("cache", state["hud_source_origin"])
+
+    def test_no_source_and_no_download_is_a_clean_error(self) -> None:
+        game = write_fake_game(self.tmp / "Deadlock", compiled_only=True, build_id="6785")
+        code, output = _run([
+            "--game-path", str(game),
+            "--no-hud-download",
+            "--compiler-cmd", COMPILER_CMD_TEMPLATE,
+            "--out", str(self.out), "--build-dir", str(self.build),
+        ])
+        self.assertEqual(build_mod.EXIT_ERROR, code, output)
+        self.assertIn("hud.xml", output)
+        self.assertIn("hud.vxml_c", output)
+        self.assertIn("--hud-xml", output)
+        report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("hud.xml", report)
+
 
 
 class BuildBatTest(unittest.TestCase):
@@ -334,6 +460,25 @@ class BuildBatTest(unittest.TestCase):
     def test_run_tests_command_is_valid(self) -> None:
         self.assertIn('unittest discover -s "%MOD_DIR%\\tests" -p "test_*.py"', self.text)
         self.assertNotIn('-t "%MOD_DIR%"', self.text)
+
+
+    def test_hud_flags_are_parsed_and_forwarded(self) -> None:
+        self.assertIn('if /i "%~1"=="--hud-xml-url" set "ARG_HUD_URL=%~2"', self.text)
+        self.assertIn('if /i "%~1"=="--refresh-hud-xml" set "DO_HUD_REFRESH=1"', self.text)
+        self.assertIn('if /i "%~1"=="--no-hud-download" set "NO_HUD_DOWNLOAD=1"', self.text)
+        self.assertIn('set "BUILD_ARGS=%BUILD_ARGS% --hud-xml-url "%ARG_HUD_URL%""', self.text)
+        self.assertIn('set "BUILD_ARGS=%BUILD_ARGS% --refresh-hud-xml"', self.text)
+        self.assertIn('set "BUILD_ARGS=%BUILD_ARGS% --no-hud-download"', self.text)
+        # справка не должна врать про источник ванильного файла
+        self.assertIn("--refresh-hud-xml    ignore the cached hud.xml", self.text)
+        self.assertNotIn("straight out of the game's .vpk packages", self.text)
+
+    def test_builder_accepts_the_same_flags(self) -> None:
+        for flag in ("--hud-xml-url", "--no-hud-download", "--refresh-hud-xml"):
+            self.assertIn(flag, self.text)  # build.bat
+        source = (_support.MOD_ROOT / "tools" / "build_mod.py").read_text(encoding="utf-8")
+        for flag in ("--hud-xml-url", "--no-hud-download", "--refresh-hud-xml", "--hud-xml"):
+            self.assertIn(f'"{flag}"', source)
 
 
 if __name__ == "__main__":

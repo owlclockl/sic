@@ -10,6 +10,10 @@
 > CSDK, а `prepare`, `pack`, `dmm`, `report` и вся установка работают где угодно (Linux/Proton тоже).
 > CSDK больше **не надо скачивать руками**: если компилятора нет, сборщик сам качает и распаковывает
 > Reduced CSDK 12 (`tools/csdk_setup.py`, отключается ключом `--no-auto-csdk` / `--no-csdk-download`).
+> Ванильный `hud.xml` тоже добывается сам: в паках игры Valve держит только **скомпилированный**
+> `panorama/layout/hud.vxml_c`, поэтому исходник берётся из файла рядом с игрой, из кэша прошлых
+> сборок или с зеркала депо GameTracking (`tools/vanilla_hud.py`; отключается `--no-hud-download`,
+> а после патча игры обновляется ключом `--refresh-hud-xml`).
 > Скриптов динамики тут нет (панель статичная), поэтому она не мешает игре, но и не переключает
 > шаги сама — это делается правкой текста или добавлением vjs-скрипта.
 
@@ -31,6 +35,8 @@
 * если CSDK так и не нашёлся, **скачивает и распаковывает его сам** (пункт `[1]` в меню,
   он же вариант по умолчанию): Reduced CSDK 12, в каталог вне OneDrive/Desktop/Documents,
   с догрузкой при обрыве и кэшем архива, чтобы не качать гигабайты дважды;
+* ванильный `hud.xml` берёт сам (файл в дереве игры/CSDK, кэш или зеркало депо) — в паках игры
+  исходников нет, там только `panorama/layout/hud.vxml_c`;
 * собирает VPK и пакет DMM, а в конце предлагает выложить пакет, поставить мод
   напрямую, скопировать `.cfg` тренажёра, проверить установку или открыть отчёт.
 
@@ -50,6 +56,9 @@ build.bat --clean -y --csdk-install-dir "C:\DeadlockModding"
 | `--csdk-url URL` | своя ссылка на архив CSDK (если официальная поменялась) |
 | `--csdk-redownload` | игнорировать кэш и скачать архив заново |
 | `--hud-xml FILE` | уже сохранённый ванильный `panorama/layout/hud.xml` (если игры нет) |
+| `--hud-xml-url URL` | своя ссылка на ванильный `hud.xml` (по умолчанию — зеркало депо GameTracking) |
+| `--refresh-hud-xml` | не брать `hud.xml` из кэша, взять заново (после патча игры) |
+| `--no-hud-download` | вообще не скачивать `hud.xml`: файл на диске, дерево игры/CSDK и кэш |
 | `--steps LIST` | `prepare,compile,pack,dmm,report` (по умолчанию все) |
 | `--out DIR` | куда положить артефакты (по умолчанию `dist`) |
 | `--version X.Y.Z` | версия мода |
@@ -104,7 +113,9 @@ python3 tools/install_dmm.py verify
 | Собрать всё (по умолчанию: `prepare,compile,pack,dmm,report`) | `python3 tools/build_mod.py --game-path … --csdk …` |
 | Есть только «CSDK» без игры, ванильный `hud.xml` лежит файлом | `… --hud-xml /path/to/hud.xml --csdk …` |
 | CSDK не установлен — пусть сборщик поставит его сам | `… --game-path …` (по умолчанию так и есть) |
-| Категорически без сети | `… --game-path … --no-auto-csdk` |
+| Категорически без сети | `… --game-path … --no-auto-csdk --no-hud-download` |
+| После патча игры: взять ванильный `hud.xml` заново | `… --game-path … --refresh-hud-xml` |
+| Своя ссылка на ванильный `hud.xml` | `… --hud-xml-url https://…/hud.xml` |
 | Игра есть, компилятор не нужен (проверить пайплайн) | `… --game-path … --allow-uncompiled` |
 | Собрать с нуля, удалив `build/` и `dist/` | `… --game-path … --clean` |
 | Только поставить CSDK, ничего не собирая | `python3 tools/csdk_setup.py` |
@@ -117,6 +128,30 @@ python3 tools/install_dmm.py verify
 Коды возврата: `0` — всё собрано, `2` — ошибка, `3` — сборка остановлена на компиляции
 (CSDK не найден и не скачался, либо автоскачивание отключено; артефакты «только исходники»
 не создаются, если не передан `--allow-uncompiled`).
+
+### Откуда берётся ванильный `hud.xml`
+
+Мод переопределяет `panorama/layout/hud.xml`, но **в паках игры исходника нет**: Valve кладёт туда
+только скомпилированный `panorama/layout/hud.vxml_c`. Поэтому `prepare` ищет файл по цепочке
+(`tools/vanilla_hud.py`) и берёт первый подходящий:
+
+1. `--hud-xml FILE` — если путь указан руками, берётся он (и только он);
+2. `panorama/layout/hud.xml` файлом в дереве игры или CSDK (так лежат выгрузки Source 2 Viewer);
+3. сырой `panorama/layout/hud.xml` внутри паков игры/CSDK (старые сборки, где Valve ещё клал исходники);
+4. кэш прошлых сборок — `build/vanilla/hud.xml`; он помнит, при какой сборке игры взят
+   (`build/vanilla/hud_source.json`), и если игра обновилась, файл считается устаревшим;
+5. зеркало депо `SteamTracking/GameTracking-Deadlock`, где panorama-ресурсы выложены
+   распакованными (Source 2 Viewer → XML). Ветка `master`, а источников три:
+   `raw.githubusercontent.com`, CDN jsdelivr и GitHub API (отдаёт тот же файл
+   в JSON/base64) — если один хост не отвечает, берётся со следующего, так что
+   сборка проходит и там, где raw-хост недоступен. Отключается `--no-hud-download`,
+   принудительное обновление — `--refresh-hud-xml`.
+
+Найденный файл проверяется (это правда layout: `<styles>`, `<CitadelHud>`, закрывающие теги,
+разбирается как XML), а в отчёт попадает источник, ссылка и номер сборки игры. Если не сработало
+ничего, сборщик не гадает, а объясняет: что искал, что в паках вместо исходника и как достать
+файл вручную (Source 2 Viewer → `pak01_dir.vpk` → `panorama/layout/hud.vxml_c` → Decompile →
+сохранить как `hud.xml`).
 
 ### Автоустановка CSDK: что именно происходит
 
@@ -164,7 +199,9 @@ python3 tools/csdk_setup.py --json                # итог машинно-read
 
 Рабочие файлы (не коммитятся): `build/content/citadel_addons/<addon>` — дерево аддона для CSDK,
 `build/game/citadel_addons/<addon>` — скомпилированные ресурсы, `build/vanilla/hud.xml` — копия
-ванильного файла, из которого делался патч, `build/build_state.json` — состояние сборки.
+ванильного файла, из которого делался патч (она же кэш для следующих сборок),
+`build/vanilla/hud_source.json` — откуда и с какой сборки игры этот файл,
+`build/build_state.json` — состояние сборки.
 
 ### Как устроена установка через DMM
 
@@ -272,8 +309,9 @@ compile перебирает известные места и берёт пер�
 | `build.bat` | Windows: двойной клик — сам ищет Python, Deadlock и CSDK, собирает и ставит |
 | `tools/build_mod.py` | Автосборщик: `prepare → compile → pack → dmm → report` |
 | `tools/install_dmm.py` | Установщик: `check`, `stage`, `verify`, `direct`, `uninstall`, `cfg` |
-| `tools/vpk.py` | VPK v2: запись, чтение, проверка; умеет доставать файлы из паков игры (в т.ч. многокомпонентных) |
+| `tools/vpk.py` | VPK v2: запись, чтение, проверка; паки игры читает через `mmap`, учитывает preload и проверяет CRC32 |
 | `tools/modinfo.py` | Метаданные `vpk-modinfo v1` внутрь VPK (`addoninfo.txt` + `modinfo.json`) |
+| `tools/vanilla_hud.py` | Где взять ванильный `hud.xml`: файл, дерево игры/CSDK, паки, кэш, зеркало депо |
 | `tools/hud_patch.py` | Патч `hud.xml`: вставка панели и include стилей, идемпотентно, с откатом |
 | `tools/dmm_bundle.py` | Пакет «Deadlock Mod Interchange» и zip для DMM |
 | `tools/paths.py` | Поиск Deadlock / CSDK / данных DMM, проверка запущенного процесса игры |
@@ -290,7 +328,9 @@ python3 -m unittest discover -s tests -p "test_*.py"
 ```
 
 Проверяется: байтовая раскладка VPK и её соответствие тому, что читает DMM, чтение
-многокомпонентных паков, правила `vpk-modinfo`, патч `hud.xml` (идемпотентность, CRLF, откат),
+многокомпонентных паков (preload, секции MD5/подписи, `mmap`), правила `vpk-modinfo`,
+патч `hud.xml` (идемпотентность, CRLF, откат), поиск ванильного `hud.xml` (цепочка источников,
+кэш, скачивание и внятная ошибка, когда исходника нет нигде — сеть в тестах подменяется),
 пакет interchange (ключи, пути, хеши), установщик (gameinfo, слоты, dry-run) и сквозная сборка
 через `fixtures/fake_compiler.py`. Фикстуры написаны в этом репозитории — игровые файлы Valve
 (в том числе настоящий `hud.xml`) не коммитятся, а берутся из установленной игры.
@@ -305,9 +345,12 @@ python3 -m unittest discover -s tests -p "test_*.py"
    (не распаковывать в OneDrive: Desktop/Documents ломают права и инструменты падают).
 2. **Создать аддон** в `csdkcfg.exe`: имя строчными буквами без пробелов, например `bhop_trainer`.
    Появятся `content/citadel_addons/bhop_trainer` и `game/citadel_addons/bhop_trainer`.
-3. **Достать vanilla `hud.xml`**: Source 2 Viewer → `game/citadel/pak01_dir.vpk` →
-   `panorama/layout/hud.xml` → экспортировать в
+3. **Достать vanilla `hud.xml`**: исходного `.xml` в паках игры нет, там лежит скомпилированный
+   `panorama/layout/hud.vxml_c`. Открой Source 2 Viewer → `game/citadel/pak01_dir.vpk` →
+   `panorama/layout/hud.vxml_c` → *Decompile*/*Export* и сохрани как `hud.xml` в
    `content/citadel_addons/bhop_trainer/panorama/layout/hud.xml`.
+   (Так же можно взять уже распакованный файл из зеркала депо
+   `SteamTracking/GameTracking-Deadlock`.)
 4. **Вставить разметку**: скопировать содержимое `src/bhop_trainer.vxml` в конец этого файла,
    **перед** закрывающим `</CitadelHud>`.
 5. **Подключить стили**: в начале того же `hud.xml`, внутри блока `<styles>`, добавить строку
@@ -376,6 +419,10 @@ python3 -m unittest discover -s tests -p "test_*.py"
 |---|---|
 | Панели нет в игре | Прогони `python3 tools/install_dmm.py verify`: он показывает, найден ли VPK в `citadel/addons` и есть ли строка `Game citadel/addons` в `gameinfo.gi` |
 | Мод импортировался в DMM, но не работает | Скорее всего игра была запущена: DMM не патчит `gameinfo.gi` при живом `citadel.exe`. Закрой игру и нажми **Launch modded** |
+| Сборка падает: «не нашёл ванильный panorama/layout/hud.xml» | В паках игры нет исходника — там только скомпилированный `hud.vxml_c`. Дай сети доступ (сборщик сам скачает файл с зеркала депо) либо передай его через `--hud-xml`; см. раздел «Откуда берётся ванильный `hud.xml`» |
+| Нужен ванильный `hud.xml` без сети | Возьми файл любым способом (Source 2 Viewer, зеркало депо на другой машине) и передай: `--hud-xml файл` или `--hud-xml-url file:///путь/к/hud.xml`; кэш `build/vanilla/hud.xml` переиспользуется сам |
+| Все зеркала недоступны (блокировка/фаервол) | Сборщик перебирает `raw.githubusercontent.com`, `cdn.jsdelivr.net` и `api.github.com`; если все три молчат — скачай `game/citadel/pak01_dir/panorama/layout/hud.xml` из `SteamTracking/GameTracking-Deadlock` на другой машине и передай `--hud-xml` |
+| После патча игры панель поехала / HUD сломался | Ванильный `hud.xml` устарел: `--refresh-hud-xml` и пересборка. Сборщик ещё и предупредит, если файл из кэша старше установленной сборки игры |
 | Сборка встала с кодом 3 | CSDK не нашёлся и не скачался: проверь сеть, потом `--csdk` (или переменную `DEADLOCK_CSDK`). Скачать руками: deadlockmodding.pages.dev/modding-tools/csdk-12 |
 | Сборка качает CSDK, но не может | Ссылка на файл Google Диска могла измениться: возьми свежую со страницы CSDK 12 и передай её через `--csdk-url URL`. Свой распакованный каталог — `--csdk PATH` |
 | Скачивание обрывается | Не страшно: запусти сборку снова — докачает с того же места (`csdk-cache/download.part`). Начать заново: `--csdk-redownload` |

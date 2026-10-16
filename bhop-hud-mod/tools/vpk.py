@@ -11,13 +11,20 @@
 * после записи каждого файла — терминатор ``0xFFFF`` (как у Valve и у DMM).
 
 Читатель умеет и «настоящие» игровые паки: если запись ссылается на
-companion-архив (``pak01_000.vpk``), байты берутся из него — это нужно, чтобы
-достать ванильный ``panorama/layout/hud.xml`` прямо из паков установленной игры.
+companion-архив (``pak01_000.vpk``), байты берутся из него; учитывается и
+``preload``-хвост, который Valve пишет прямо в дерево (полный размер файла —
+``entry.total_length``, и CRC32 считается по всему файлу). Большие паки
+открываются через ``mmap``, чтобы не тянуть в память сотни мегабайт.
+
+Исходных ``.xml``/``.css`` внутри паков игры нет — там только ``*_c``
+(``panorama/layout/hud.vxml_c``). Где взять исходник ``hud.xml``, описано в
+``tools/vanilla_hud.py``.
 """
 
 from __future__ import annotations
 
 import hashlib
+import mmap
 import struct
 import zlib
 from dataclasses import dataclass
@@ -31,6 +38,9 @@ HEADER_V2_SIZE = 28
 INLINE_ARCHIVE_INDEX = 0x7FFF
 ENTRY_TERMINATOR = 0xFFFF
 
+#: Порог, после которого пак открывается через ``mmap``, а не читается целиком.
+MMAP_THRESHOLD = 8 * 1024 * 1024
+
 
 class VpkError(Exception):
     """Ошибка формата или структуры VPK."""
@@ -38,7 +48,14 @@ class VpkError(Exception):
 
 @dataclass(frozen=True)
 class Entry:
-    """Одна запись дерева VPK."""
+    """Одна запись дерева VPK.
+
+    ``length`` — сколько байт файла лежит в секции данных (или в
+    companion-архиве), ``preload`` — «довесок», который Valve пишет прямо в
+    дерево перед секцией данных. Полный размер файла — их сумма (так же считает
+    ``TotalLength`` в ValvePak у ValveResourceFormat), и CRC32 считается по
+    целому файлу.
+    """
 
     path: str  # полный виртуальный путь нижним регистром, через '/'
     crc32: int
@@ -46,10 +63,15 @@ class Entry:
     archive_index: int
     offset: int
     length: int
+    preload: bytes = b""
 
     @property
     def is_inline(self) -> bool:
         return self.archive_index == INLINE_ARCHIVE_INDEX
+
+    @property
+    def total_length(self) -> int:
+        return len(self.preload) + self.length
 
 
 def crc32_of(data: bytes) -> int:
@@ -160,17 +182,42 @@ def build_vpk_from_dir(root: Path, files: Iterable[Path] | None = None) -> bytes
 class VpkArchive:
     """Читатель VPK (v1 и v2, inline и companion-архивы)."""
 
-    def __init__(self, path: Path, buffer: bytes):
+    def __init__(self, path: Path, buffer: "bytes | mmap.mmap"):
         self.path = Path(path)
         self.buffer = buffer
         self.header_size, self.version, self.tree_size, self.data_size = _read_header(buffer)
         self.entries: list[Entry] = _read_tree(buffer, self.header_size, self.tree_size)
         self._index = {entry.path: entry for entry in self.entries}
+        self._mapping: mmap.mmap | None = None
+
+    # -- ресурсы ----------------------------------------------------------- #
+
+    def close(self) -> None:
+        """Отпустить память (для игровых паков в сотни мегабайт)."""
+        mapping, self._mapping = self._mapping, None
+        if mapping is not None:
+            try:
+                mapping.close()
+            except (BufferError, OSError):  # pragma: no cover - зависит от ОС
+                pass
+            self.buffer = b""
+
+    def __enter__(self) -> "VpkArchive":
+        return self
+
+    def __exit__(self, *exc_info: object) -> bool:
+        self.close()
+        return False
 
     # -- интроспекция ------------------------------------------------------ #
 
     @property
     def data_section_start(self) -> int:
+        """Начало секции данных.
+
+        По формату (см. ``Package.Read`` в ValvePak) она идёт **сразу** после
+        дерева, а секции MD5/подписи — уже за ней.
+        """
         return self.header_size + self.tree_size
 
     def list_entries(self) -> list[str]:
@@ -189,25 +236,41 @@ class VpkArchive:
         base = stem[: -len("_dir")] if stem.endswith("_dir") else stem
         return self.path.parent / f"{base}_{archive_index:03d}.vpk"
 
-    def read_entry(self, entry: Entry) -> bytes:
-        if entry.length == 0:
-            return b""
-        if entry.is_inline:
-            start = self.data_section_start + entry.offset
-            end = start + entry.length
-            if end > len(self.buffer):
-                raise VpkError(f"{entry.path}: inline-данные выходят за границы файла")
-            return self.buffer[start:end]
-        companion = self.companion_path(entry.archive_index)
-        if not companion.is_file():
-            raise VpkError(
-                f"{entry.path}: нужен companion-архив {companion.name}, но его нет рядом с {self.path.name}"
-            )
-        with companion.open("rb") as handle:
-            handle.seek(entry.offset)
-            payload = handle.read(entry.length)
-        if len(payload) != entry.length:
-            raise VpkError(f"{entry.path}: в {companion.name} не хватило данных")
+    def read_entry(self, entry: Entry, *, verify_crc: bool = False) -> bytes:
+        """Содержимое записи: preload из дерева + данные из секции/архива.
+
+        ``verify_crc`` полезен при чтении чужих файлов (паки игры): CRC32
+        считается по всему файлу, поэтому несовпадение сразу показывает, что
+        данные прочитаны неверно, а не «примерно те».
+        """
+        payload = entry.preload
+        if entry.length:
+            if entry.is_inline:
+                start = self.data_section_start + entry.offset
+                end = start + entry.length
+                if end > len(self.buffer):
+                    raise VpkError(f"{entry.path}: inline-данные выходят за границы файла")
+                payload += bytes(self.buffer[start:end])
+            else:
+                companion = self.companion_path(entry.archive_index)
+                if not companion.is_file():
+                    raise VpkError(
+                        f"{entry.path}: нужен companion-архив {companion.name}, "
+                        f"но его нет рядом с {self.path.name}"
+                    )
+                with companion.open("rb") as handle:
+                    handle.seek(entry.offset)
+                    chunk = handle.read(entry.length)
+                if len(chunk) != entry.length:
+                    raise VpkError(f"{entry.path}: в {companion.name} не хватило данных")
+                payload += chunk
+        if verify_crc:
+            actual = crc32_of(payload)
+            if actual != entry.crc32:
+                raise VpkError(
+                    f"{entry.path}: CRC32 не совпал (в дереве 0x{entry.crc32:08X}, "
+                    f"у данных 0x{actual:08X}) — формат прочитан неверно или файл изменился"
+                )
         return payload
 
     def extract(self, virtual_path: str) -> bytes:
@@ -282,25 +345,28 @@ def _read_tree(buffer: bytes, header_size: int, tree_size: int) -> list[Entry]:
                     break
                 if cursor + 18 > len(buffer):
                     raise VpkError("обрывается запись дерева VPK")
-                crc, preload, archive_index, offset, length, _terminator = struct.unpack_from(
+                crc, preload_size, archive_index, offset, length, _terminator = struct.unpack_from(
                     "<IHHIIH", buffer, cursor
                 )
                 cursor += 18
+                preload = b""
+                if preload_size:
+                    if cursor + preload_size > len(buffer):
+                        raise VpkError("preload-данные выходят за границы файла")
+                    preload = bytes(buffer[cursor : cursor + preload_size])
+                    cursor += preload_size
                 full_path = "/".join(part for part in ("" if directory == " " else directory, f"{stem}.{extension}") if part)
                 entries.append(
                     Entry(
                         path=normalize_virtual_path(full_path),
                         crc32=crc,
-                        preload_bytes=preload,
+                        preload_bytes=preload_size,
                         archive_index=archive_index,
                         offset=offset,
                         length=length,
+                        preload=preload,
                     )
                 )
-                if preload:
-                    cursor += preload
-                    if cursor > len(buffer):
-                        raise VpkError("preload-данные выходят за границы файла")
     return entries
 
 
@@ -312,7 +378,27 @@ def _safe_relative(virtual_path: str) -> Path | None:
 
 
 def open_vpk(path: Path) -> VpkArchive:
+    """Открыть VPK: большие файлы мапятся в память, мелкие читаются целиком.
+
+    Пак игры может быть в сотни мегабайт, а нужна из него одна запись, поэтому
+    всё, что больше :data:`MMAP_THRESHOLD`, читается через ``mmap`` (закрывать
+    за собой — :meth:`VpkArchive.close`).
+    """
     path = Path(path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    if size > MMAP_THRESHOLD:
+        try:
+            with path.open("rb") as handle:
+                mapping = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
+        except (OSError, ValueError):
+            archive = VpkArchive(path, path.read_bytes())
+        else:
+            archive = VpkArchive(path, mapping)
+            archive._mapping = mapping
+        return archive
     return VpkArchive(path, path.read_bytes())
 
 
@@ -357,8 +443,8 @@ def verify_vpk(vpk_bytes: bytes, expected: Mapping[str, bytes]) -> list[str]:
         entry = archive.find(canonical)
         if entry is None:
             continue
-        if entry.length != len(payload):
-            problems.append(f"{canonical}: длина {entry.length} != {len(payload)}")
+        if entry.total_length != len(payload):
+            problems.append(f"{canonical}: длина {entry.total_length} != {len(payload)}")
             continue
         if not entry.is_inline:
             problems.append(f"{canonical}: данные не inline (archive_index={entry.archive_index})")
@@ -388,9 +474,15 @@ def iter_pak_family(dir_vpk: Path) -> Iterator[Path]:
 
 
 def find_pak_candidates(game_citadel_dir: Path) -> list[Path]:
-    """Все ``pakNN_dir.vpk`` каталога игры по возрастанию номера (``pak01`` первым)."""
+    """Все ``pakNN_dir.vpk`` каталога игры по возрастанию номера (``pak01`` первым).
+
+    Смотрим только сам каталог (``game/citadel``): моды лежат в подпапке
+    ``citadel/addons``, и брать оттуда «ванильный» файл было бы ошибкой.
+    """
     game_citadel_dir = Path(game_citadel_dir)
-    return sorted(Path(game_citadel_dir).glob("pak*_dir.vpk"))
+    if not game_citadel_dir.is_dir():
+        return []
+    return sorted(path for path in game_citadel_dir.glob("pak*_dir.vpk") if path.is_file())
 
 
 def extract_from_game(game_citadel_dir: Path, virtual_path: str) -> bytes | None:
@@ -399,6 +491,10 @@ def extract_from_game(game_citadel_dir: Path, virtual_path: str) -> bytes | None
     Берём первый пак по возрастанию номера: нужен *ванильный* файл, а
     ``pak01`` — базовые ассеты игры (моды живут в ``citadel/addons`` и сюда
     обычно не попадают).
+
+    Важно: в паках игры лежат **скомпилированные** ресурсы
+    (``panorama/layout/hud.vxml_c``), исходных ``.xml``/``.css`` там нет —
+    для поиска исходника см. ``tools/vanilla_hud.py``.
     """
     wanted = normalize_virtual_path(virtual_path)
     for pak in find_pak_candidates(game_citadel_dir):
@@ -406,6 +502,10 @@ def extract_from_game(game_citadel_dir: Path, virtual_path: str) -> bytes | None
             archive = open_vpk(pak)
         except (VpkError, OSError):
             continue
-        if archive.contains(wanted):
-            return archive.extract(wanted)
+        with archive:
+            if archive.contains(wanted):
+                try:
+                    return archive.read_entry(archive.find(wanted), verify_crc=True)  # type: ignore[arg-type]
+                except VpkError:
+                    continue
     return None

@@ -9,10 +9,13 @@
    ``--no-auto-csdk``. С ``--clean`` сборка идёт с нуля: рабочие каталоги
    удаляются перед стартом.
 
-1. ``prepare`` — берёт ванильный ``panorama/layout/hud.xml`` (из явного файла
-   или прямо из паков установленной игры), вставляет туда панель из
-   ``src/bhop_trainer.vxml`` и подключает ``src/bhop_trainer.vcss``; собирает
-   дерево аддона ``content/citadel_addons/<addon>``.
+1. ``prepare`` — берёт ванильный ``panorama/layout/hud.xml`` (явный файл,
+   распакованный файл в дереве игры/CSDK, сырой исходник внутри паков, кэш
+   прошлых сборок или зеркало депо — см. ``tools/vanilla_hud.py``), вставляет
+   туда панель из ``src/bhop_trainer.vxml`` и подключает
+   ``src/bhop_trainer.vcss``; собирает дерево аддона
+   ``content/citadel_addons/<addon>``. Отключить скачивание:
+   ``--no-hud-download``; взять заново: ``--refresh-hud-xml``.
 2. ``compile`` — прогоняет исходники через ``resourcecompiler.exe`` из CSDK
    (движок Deadlock не грузит сырые ``.xml``/``.css`` из аддона: нужны
    ``.vxml_c`` / ``.vcss_c``). Без компилятора шаг можно пропустить только
@@ -53,6 +56,7 @@ import dmm_bundle  # noqa: E402
 import hud_patch  # noqa: E402
 import modinfo  # noqa: E402
 import paths as paths_mod  # noqa: E402
+import vanilla_hud  # noqa: E402
 import vpk  # noqa: E402
 
 TOOL = dmm_bundle.MANAGER_ID
@@ -204,32 +208,53 @@ def step_prepare(ctx: Context) -> None:
     game_dir = ctx.args.game_dir
     if hud_xml_arg is None and game_dir is None:
         game_dir = paths_mod.find_game_dir(None)
+    csdk_root = (Path(ctx.args.csdk).expanduser() if ctx.args.csdk
+                 else paths_mod.find_csdk(None))
 
-    vanilla_bytes: bytes | None = None
-    source_label = "нет"
-    if hud_xml_arg is not None:
-        original_path, vanilla_bytes = hud_patch.locate_vanilla_hud_xml(None, hud_xml_arg)
-        source_label = f"файл {original_path}"
-        ctx.state["hud_source"] = str(original_path)
-    elif game_dir is not None:
-        vanilla_bytes = vpk.extract_from_game(Path(game_dir) / "game" / "citadel", hud_patch.HUD_XML_VIRTUAL_PATH)
-        if vanilla_bytes is None:
-            raise SystemExit(
-                f"в паках игры ({game_dir}) не найден {hud_patch.HUD_XML_VIRTUAL_PATH}: "
-                "проверь путь или передай ванильный файл через --hud-xml"
-            )
-        source_label = f"паки игры {game_dir}"
-        ctx.state["hud_source"] = f"{game_dir}::{hud_patch.HUD_XML_VIRTUAL_PATH}"
-    else:
-        raise SystemExit(
-            "не найден ванильный hud.xml: укажи --game-path (папка Deadlock) или --hud-xml (файл).\n"
-            "Без него собрать работающий HUD-мод нельзя: игра читает именно panorama/layout/hud.xml."
+    allow_download = bool(ctx.args.hud_download or ctx.args.hud_xml_url)
+    if ctx.args.hud_xml_url and not ctx.args.hud_download:
+        # Явная ссылка — это и есть просьба взять файл оттуда (бывает и file://).
+        ctx.note("--hud-xml-url задан: файл берётся по этой ссылке, --no-hud-download не мешает")
+    try:
+        source = vanilla_hud.resolve(
+            game_dir=game_dir,
+            csdk_root=csdk_root,
+            explicit=hud_xml_arg,
+            cache_dir=ctx.build_dir / "vanilla",
+            allow_download=allow_download,
+            refresh=ctx.args.refresh_hud_xml,
+            urls=[ctx.args.hud_xml_url] if ctx.args.hud_xml_url else None,
+            log=ctx.note,
+            warn=ctx.warn,
+        )
+    except vanilla_hud.HudSourceError as error:
+        raise SystemExit(str(error))
+
+    if source.origin == "loose":
+        ctx.warn(
+            "ванильный hud.xml взят файлом из дерева игры — если это не выгрузка Valve, "
+            "а патч другого мода, лучше убрать его (или передать свой через --hud-xml)"
         )
 
-    ctx.state["hud_source_label"] = source_label
+    vanilla_bytes = source.data
+    ctx.state["hud_source_label"] = source.label
+    ctx.state["hud_source_origin"] = source.origin
+    ctx.state["hud_source"] = (
+        f"{game_dir}::{hud_patch.HUD_XML_VIRTUAL_PATH}" if source.origin == "pak"
+        else (source.url or source.label)
+    )
+    if source.url:
+        ctx.state["hud_source_url"] = source.url
+    if source.build_id:
+        ctx.state["hud_build_id"] = source.build_id
+    if source.game_build_id:
+        ctx.state["hud_game_build_id"] = source.game_build_id
+    for message in source.notes:
+        ctx.note(message)
+    ctx.note(f"ванильный hud.xml: {source.label} (источник: {source.origin})")
     ctx.state["hud_vanilla_sha256"] = vpk.sha256_of(vanilla_bytes)
     vanilla_text = vanilla_bytes.decode("utf-8", "replace")
-    ctx.note(f"ванильный hud.xml: {source_label}, sha256 {ctx.state['hud_vanilla_sha256'][:16]}…")
+    ctx.note(f"sha256 ванильного hud.xml: {ctx.state['hud_vanilla_sha256'][:16]}…")
 
     patched = hud_patch.patch_hud_xml(vanilla_text, snippet=snippet, style_src=STYLE_SRC)
     if patched.already_patched:
@@ -770,6 +795,11 @@ def _render_report(ctx: Context) -> str:
         "## Входные данные",
         "",
         f"- Ванильный hud.xml: {ctx.state.get('hud_source_label', 'нет данных')}",
+        f"  - источник: `{ctx.state.get('hud_source_origin', 'нет данных')}`"
+        + (f", ссылка `{ctx.state['hud_source_url']}`" if ctx.state.get("hud_source_url") else ""),
+        f"  - сборка игры, к которой относится файл: `{ctx.state.get('hud_build_id', 'неизвестно')}`"
+        + (f", установленная сборка: `{ctx.state['hud_game_build_id']}`"
+           if ctx.state.get("hud_game_build_id") else ""),
         f"  - sha256 оригинала: `{ctx.state.get('hud_vanilla_sha256', '')}`",
         f"  - sha256 после патча: `{ctx.state.get('hud_patched_sha256', '')}`",
         f"- Компилятор CSDK: `{ctx.state.get('csdk_compiler') or 'не найден'}`",
@@ -824,8 +854,27 @@ def build_parser() -> argparse.ArgumentParser:
         description="Автосборщик VPK и пакета Deadlock Mod Manager для Bhop Trainer HUD.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--game-path", help="папка Deadlock (или её game/citadel) — оттуда берётся ванильный hud.xml")
+    parser.add_argument(
+        "--game-path",
+        help="папка Deadlock (или её game/citadel) — из неё берётся ванильный hud.xml",
+    )
     parser.add_argument("--hud-xml", help="явный путь к ванильному panorama/layout/hud.xml")
+    parser.add_argument(
+        "--hud-xml-url",
+        help="своя ссылка на ванильный hud.xml: http(s) или file:///… "
+             "(по умолчанию — зеркало депо GameTracking)",
+    )
+    parser.add_argument(
+        "--no-hud-download",
+        dest="hud_download",
+        action="store_false",
+        help="не скачивать ванильный hud.xml: брать только файл на диске, дерево игры/CSDK и кэш",
+    )
+    parser.add_argument(
+        "--refresh-hud-xml",
+        action="store_true",
+        help="не использовать кэш: взять ванильный hud.xml заново (после патча игры)",
+    )
     parser.add_argument("--csdk", help="путь к CSDK с resourcecompiler.exe")
     parser.add_argument(
         "--no-auto-csdk",

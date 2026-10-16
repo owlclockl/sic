@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import _support  # noqa: F401 - добавляет tools/ в sys.path
-from _support import HUD_FIXTURE, MOD_ROOT, write_fake_game
+from _support import HUD_FIXTURE, MOD_ROOT
 
 import hud_patch
 
@@ -95,24 +95,6 @@ class PatchTest(unittest.TestCase):
     def test_broken_snippet_is_rejected_by_xml_check(self) -> None:
         with self.assertRaises(hud_patch.HudPatchError):
             hud_patch.patch_hud_xml(_vanilla(), snippet='<Panel class="x">')
-
-
-class LocateVanillaTest(unittest.TestCase):
-    def test_reads_explicit_file(self) -> None:
-        path, data = hud_patch.locate_vanilla_hud_xml(None, HUD_FIXTURE)
-        self.assertEqual(HUD_FIXTURE, path)
-        self.assertEqual(_vanilla().encode("utf-8"), data)
-
-    def test_extracts_from_game_paks(self) -> None:
-        with TemporaryDirectory() as tmp:
-            game_dir = write_fake_game(Path(tmp), b"<root>\n\t<styles>\n\t</styles>\n</root>\n")
-            path, data = hud_patch.locate_vanilla_hud_xml(game_dir, None)
-            self.assertIsNone(path)
-            self.assertEqual(b"<root>\n\t<styles>\n\t</styles>\n</root>\n", data)
-
-    def test_missing_explicit_file_raises(self) -> None:
-        with self.assertRaises(hud_patch.HudPatchError):
-            hud_patch.locate_vanilla_hud_xml(None, Path("/nope/does-not-exist.xml"))
 
 
 if __name__ == "__main__":
