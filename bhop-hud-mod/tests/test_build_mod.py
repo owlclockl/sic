@@ -254,10 +254,12 @@ class FullPipelineTest(PipelineCase):
 
 
 class MissingCompilerTest(PipelineCase):
+    # Автоустановка CSDK в тестах отключена: они не должны ходить в сеть.
     def test_stops_with_needs_compile_status(self) -> None:
         code, output = _run([
             "--hud-xml", str(HUD_FIXTURE),
             "--csdk", str(self.tmp / "no-such-csdk"),
+            "--no-auto-csdk",
             "--out", str(self.out), "--build-dir", str(self.build),
         ])
         self.assertEqual(build_mod.EXIT_NEEDS_COMPILE, code, output)

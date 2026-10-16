@@ -17,3 +17,8 @@ Thumbs.db
 # в репозитории им не место: это ассеты Valve.
 bhop-hud-mod/build/vanilla/
 *.hud.xml.local
+
+# CSDK 12, скачанный и распакованный автоматически (гигабайты — не в репозитории)
+csdk/
+csdk-cache/
+*.part
