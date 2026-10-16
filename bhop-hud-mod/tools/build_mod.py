@@ -567,8 +567,9 @@ def _csdk_damaged_hints() -> list[str]:
         " • CSDK лежит в OneDrive/Desktop/Documents, где антивирус или синхронизация мешают.",
         "",
         "Что делать:",
-        " • переустановить CSDK в новый каталог вне OneDrive:",
-        r'     build.bat --csdk-install-dir "C:\DeadlockModding\Reduced_CSDK_12_new" --csdk-redownload',
+        r" • переименовать или удалить каталог %LOCALAPPDATA%\DeadlockModding\Reduced_CSDK_12:",
+        "   поиск CSDK берёт его первым, даже если он сломан; затем запустить сборку с",
+        "   --csdk-redownload (архив скачается заново, а не возьмётся из кэша);",
         " • установить VC++ Redistributable 2015–2022 (x64) и повторить сборку;",
         " • журнал полностью: папка build\\compile_logs (см. ссылки ниже).",
     ]
