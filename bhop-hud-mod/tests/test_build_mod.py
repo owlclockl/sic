@@ -631,6 +631,38 @@ class ReportHonestyTest(PipelineCase):
         self.assertIn("boom: compile failed", report)
         self.assertNotIn("Сборка выполнялась вне Windows", report)
 
+    def test_compiler_failure_keeps_head_and_full_log(self) -> None:
+        # Ключевая строка (как в реальном падении CSDK) стоит в НАЧАЛЕ вывода:
+        # раньше отчёт показывал только хвост и её терял.
+        script = self.tmp / "noisy_compiler.py"
+        script.write_text(
+            "import sys\n"
+            "print('CAppSystemDict:Unable to load module modtools (Dependency of application), error 126')\n"
+            "for i in range(300):\n"
+            "    print(f'CMaterial2 noise line {i}')\n"
+            "print('final line: giving up')\n"
+            "sys.exit(1)\n",
+            encoding="utf-8",
+        )
+        args = [
+            "--hud-xml", str(HUD_FIXTURE),
+            "--compiler-cmd", f'"{PYTHON}" "{script}"',
+            "--out", str(self.out), "--build-dir", str(self.build),
+            "--steps", "prepare,compile",
+        ]
+        code, output = _run(args)
+        self.assertEqual(2, code, output)
+        report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("Unable to load module modtools", report)
+        self.assertIn("final line: giving up", report)
+        self.assertIn("пропущено", report)
+        self.assertIn("--csdk-redownload", report)  # подсказка про сломанный CSDK
+        self.assertIn("compile_logs", output)  # ссылка на полный журнал — в консоли
+        logs = list((self.build / "compile_logs").glob("*.log"))
+        self.assertEqual(1, len(logs))
+        full = logs[0].read_text(encoding="utf-8")
+        self.assertIn("noise line 299", full)  # полный журнал не урезан
+
     def test_placeholder_compiler_report_does_not_claim_valve_compiler(self) -> None:
         args = [
             "--hud-xml", str(HUD_FIXTURE),
@@ -725,3 +757,30 @@ class BuildBatTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CompilerExcerptTest(unittest.TestCase):
+    """Выжимка из вывода компилятора: начало и ключевые строки не теряются."""
+
+    def test_short_output_is_kept_whole(self) -> None:
+        text = "line one\nline two"
+        self.assertEqual(["line one", "line two"], build_mod._output_excerpt(text))
+
+    def test_long_output_keeps_head_error_lines_and_tail(self) -> None:
+        lines = ["first line: Unable to load module modtools, error 126"]
+        lines += [f"noise {i}" for i in range(200)]
+        lines += ["ERROR: something in the middle", "last line"]
+        excerpt = build_mod._output_excerpt("\n".join(lines))
+        self.assertEqual("first line: Unable to load module modtools, error 126", excerpt[0])
+        self.assertEqual("last line", excerpt[-1])
+        self.assertIn("ERROR: something in the middle", excerpt)
+        self.assertTrue(any("пропущено" in line for line in excerpt))
+        self.assertLess(len(excerpt), 60)
+
+    def test_repeated_error_lines_are_deduplicated(self) -> None:
+        repeated = ["Error creating shader x.vfx for material m.vmat!"] * 80
+        lines = ["head"] * 25 + repeated + ["tail"] * 20
+        excerpt = build_mod._output_excerpt("\n".join(lines))
+        self.assertEqual(1, sum(1 for line in excerpt if "Error creating shader" in line))
+
+
