@@ -26,7 +26,7 @@
 
     python3 tools/csdk_setup.py                       # найти или скачать
     python3 tools/csdk_setup.py --install-dir C:\\csdk
-    python3 tools/csdk_setup.py --url https://.../csdk.zip
+    python3 tools/csdk_setup.py --url https://.../csdk.zip --url file:///mirror.zip
     python3 tools/csdk_setup.py --no-download         # только поиск
 
 Коды возврата: ``0`` — компилятор готов, ``3`` — CSDK не найден и скачивание
@@ -74,6 +74,24 @@ CSDK_DIRECT_URL = (
 
 #: Классическая ссылка: отдаёт HTML с токеном подтверждения для больших файлов.
 CSDK_CONFIRM_URL = f"https://docs.google.com/uc?export=download&id={CSDK_DRIVE_FILE_ID}"
+
+#: Источники по умолчанию, по порядку: новый endpoint, затем классический.
+#: Оба ведут на один и тот же файл с той же страницы CSDK 12, но ведут себя
+#: по-разному, когда Google Диск упирается в лимит скачиваний.
+CSDK_DEFAULT_URLS: tuple[str, ...] = (CSDK_DIRECT_URL, CSDK_CONFIRM_URL)
+
+#: Фразы, по которым видно, что Google Диск не отдаёт файл из-за лимита.
+#:
+#: Это не «страница подтверждения»: разбирать там нечего, файл просто
+#: недоступен какое-то время (у больших публичных файлов — суточный лимит).
+DRIVE_BLOCK_MARKERS: tuple[str, ...] = (
+    "too many users have",
+    "download quota exceeded",
+    "quota exceeded",
+    "you have exceeded your download quota",
+    "sorry, you can't view or download this file at this time",
+    "unusual traffic",
+)
 
 #: Внутреннее имя архива и каталога установки (так он называется в официальном
 #: архиве: внутри лежит единственная папка ``Reduced_CSDK_12``).
@@ -206,6 +224,37 @@ def _with_params(url: str, **params: str) -> str:
 def _looks_like_html(chunk: bytes) -> bool:
     head = chunk.lstrip()[:256].lower()
     return head.startswith(b"<!doctype html") or head.startswith(b"<html") or b"<title>" in head[:256]
+
+
+def _drive_block_reason(html: str) -> str | None:
+    """Почему Google Диск не отдаёт файл (``None`` — это обычная страница).
+
+    У больших публичных файлов Google Диска есть суточный лимит скачиваний, и
+    вместо файла приходит страница «Too many users have viewed or downloaded this
+    file». Разбирать её бессмысленно: подтверждения там нет, помочь может только
+    другой источник, кэш или ожидание.
+    """
+    lowered = html.lower()
+    for marker in DRIVE_BLOCK_MARKERS:
+        if marker in lowered:
+            return (
+                "Google Диск не отдаёт архив: сработал лимит скачиваний "
+                f"«{marker}». Это не ошибка сборки — файл временно недоступен."
+            )
+    return None
+
+
+def _manual_hints(cache_dir: Path | None = None) -> str:
+    """Что делать, когда автоскачивание CSDK не работает."""
+    where = str(cache_dir) if cache_dir else r"%LOCALAPPDATA%\DeadlockModding\csdk-cache"
+    return (
+        f"  Страница с архивом: {CSDK_PAGE_URL}\n"
+        "  Скачай Reduced CSDK 12 вручную и передай архив сборщику одним из способов:\n"
+        "   • положить архив в кэш (следующий запуск возьмёт его сам):\n"
+        f"     {where};\n"
+        '   • build.bat --csdk-url "file:///C:/путь/Reduced_CSDK_12.zip";\n'
+        '   • распаковать архив и указать каталог: build.bat --csdk "C:\\Reduced_CSDK_12".'
+    )
 
 
 def _confirm_tokens(html: str) -> dict[str, str]:
@@ -357,19 +406,20 @@ def download(
         with response:
             if _looks_like_html(first):
                 body = (first + response.read(MAX_HTML_PEEK)).decode("utf-8", "replace")
+                blocked = _drive_block_reason(body)
+                if blocked is not None:
+                    raise CsdkError(f"{blocked}\n{_manual_hints(directory)}")
                 tokens = _confirm_tokens(body)
                 if "confirm" not in tokens:
                     raise CsdkError(
                         "Google Диск не отдал файл, а страницу подтверждения разобрать не удалось.\n"
-                        f"  Скачай CSDK вручную: {CSDK_PAGE_URL}\n"
-                        "  и передай архив через --url file:///путь/к/архиву.zip либо распакуй и укажи --csdk"
+                        f"{_manual_hints(directory)}"
                     )
                 confirm_rounds += 1
                 if confirm_rounds > 2:
                     raise CsdkError(
                         "Google Диск упорно отдаёт страницу подтверждения вместо файла.\n"
-                        f"  Скачай CSDK вручную: {CSDK_PAGE_URL}\n"
-                        "  и передай архив через --url file:///путь/к/архиву.zip либо распакуй и укажи --csdk"
+                        f"{_manual_hints(directory)}"
                     )
                 pending_url = _with_params(pending_url, confirm=tokens["confirm"], uuid=tokens.get("uuid", ""))
                 log("· Google Диск просит подтверждение — повторяю запрос с токеном")
@@ -436,6 +486,63 @@ def download(
         f"не удалось скачать CSDK за {attempts} попыток: {last_error}\n"
         f"  Ссылка: {pending_url}\n"
         f"  Ручной вариант: {CSDK_PAGE_URL} и затем --csdk PATH"
+    )
+
+
+def split_urls(value: str | Sequence[str] | None) -> list[str]:
+    """Разобрать ссылки: одна строка (несколько — через ``;``/``,``/пробел) или список."""
+    if value is None:
+        return []
+    items = [value] if isinstance(value, str) else list(value)
+    urls: list[str] = []
+    for item in items:
+        for chunk in re.split(r"[;,\s]+", str(item).strip()):
+            if chunk and chunk not in urls:
+                urls.append(chunk)
+    return urls
+
+
+def download_many(
+    urls: Sequence[str],
+    directory: Path,
+    *,
+    filename: str | None = None,
+    sha256: str | None = None,
+    progress: Callable[[int, int | None], None] | None = None,
+    log: Callable[[str], None] | None = None,
+    timeout: int = DEFAULT_TIMEOUT,
+    attempts: int = DEFAULT_ATTEMPTS,
+    opener: urllib.request.OpenerDirector | None = None,
+    redownload: bool = False,
+) -> Path:
+    """Скачать архив, перебирая источники по порядку.
+
+    Официальная ссылка одна, но у неё есть два варианта endpoint'а, и любой из
+    них может упереться в лимит Google Диска. Если источник не отдал файл —
+    пробуем следующий, а в конце поднимаем ошибку с причинами по каждому.
+    """
+    log = log or (lambda message: None)
+    sources = [url for url in urls if url]
+    if not sources:
+        raise CsdkError("не передано ни одной ссылки на архив CSDK")
+    problems: list[str] = []
+    for index, url in enumerate(sources, start=1):
+        if len(sources) > 1:
+            log(f"· источник {index}/{len(sources)}: {url}")
+        try:
+            return download(
+                url, directory, filename=filename, sha256=sha256, progress=progress,
+                log=log, timeout=timeout, attempts=attempts, opener=opener,
+                redownload=redownload and index == 1,
+            )
+        except CsdkError as error:
+            problems.append(f"{url}: {error}")
+            if index < len(sources):
+                log(f"! источник не сработал: {error}")
+    raise CsdkError(
+        "не удалось скачать архив CSDK ни с одного источника:\n  "
+        + "\n  ".join(problems)
+        + f"\n{_manual_hints(Path(directory))}"
     )
 
 
@@ -697,7 +804,7 @@ def ensure_csdk(
     *,
     explicit: Path | str | None = None,
     install_root: Path | str | None = None,
-    url: str | None = None,
+    url: str | Sequence[str] | None = None,
     sha256: str | None = None,
     cache_dir: Path | str | None = None,
     allow_download: bool = True,
@@ -736,7 +843,9 @@ def ensure_csdk(
 
     target_root = Path(install_root) if install_root else default_install_root()
     target_cache = Path(cache_dir) if cache_dir else default_cache_dir(target_root)
-    source_url = url or os.environ.get("DEADLOCK_CSDK_URL") or CSDK_DIRECT_URL
+    sources = split_urls(url) or split_urls(os.environ.get("DEADLOCK_CSDK_URL")) or list(CSDK_DEFAULT_URLS)
+    source_url = sources[0]
+    cached = _cached_archive(target_cache)
 
     # Распаковывали ли сюда раньше. Каталог по умолчанию paths.find_csdk видит
     # и сам, а вот свой --csdk-install-dir надо проверить отдельно: иначе каждый
@@ -767,20 +876,38 @@ def ensure_csdk(
     log("  CSDK 12 не найден — скачиваю и устанавливаю сам")
     log("=" * 60)
     log(f"  куда:      {target_root}")
-    log(f"  откуда:    {source_url}")
+    log(f"  откуда:    {', '.join(sources)}")
     log(f"  кэш:       {target_cache}")
 
     try:
-        existing = _cached_archive(target_cache)
-        if existing is not None and not redownload:
-            log(f"· в кэше уже есть архив: {existing} — распаковываю, не качая заново")
-            result.archive = existing
+        if cached is not None and not redownload:
+            log(f"· в кэше уже есть архив: {cached} — распаковываю, не качая заново")
+            result.archive = cached
         if result.archive is None:
             result.url = source_url
-            result.archive = download(
-                source_url, target_cache, sha256=sha256, log=log, progress=progress,
-                timeout=timeout, redownload=redownload,
-            )
+            try:
+                result.archive = download_many(
+                    sources, target_cache, sha256=sha256, log=log, progress=progress,
+                    timeout=timeout, redownload=redownload,
+                )
+            except CsdkError:
+                # Скачать свежий архив не вышло (лимит Google Диска, сеть), но в
+                # кэше лежит рабочий — лучше собрать мод на нём, чем остаться без
+                # CSDK совсем. Молча этого не делаем: предупреждаем и говорим, как
+                # обновить архив.
+                if cached is None:
+                    raise
+                log(
+                    "! свежий архив скачать не удалось — беру уже скачанный из кэша:\n"
+                    f"  {cached}\n"
+                    f"  Обновить его: удалить файл и запустить сборку с --csdk-redownload,\n"
+                    f"  либо положить новый архив со страницы {CSDK_PAGE_URL} в {target_cache}"
+                )
+                result.say(
+                    "свежий архив скачать не удалось (лимит Google Диска или сеть) — "
+                    f"использую архив из кэша: {cached}"
+                )
+                result.archive = cached
         compiler = install_from_archive(
             result.archive, target_root, allow_tool_install=allow_tool_install, log=log
         )
@@ -800,7 +927,50 @@ def ensure_csdk(
     result.say(f"CSDK установлен: {target_root}")
     result.say(f"компилятор: {compiler}")
     log(f"· готово: {compiler}")
+    _describe_install(target_root, log=log, result=result)
     return result
+
+
+def _describe_install(
+    root: Path,
+    *,
+    log: Callable[[str], None],
+    result: SetupResult | None = None,
+) -> None:
+    """Рассказать, что именно оказалось в распакованном CSDK.
+
+    Полнота установки определяет, соберётся ли мод: компилятору нужен базовый мод
+    (``game/citadel/gameinfo.gi``) и собственные модули инструментов
+    (``modtools.dll`` и родня). Если чего-то нет — говорим об этом сразу, а не
+    после получаса компиляции.
+    """
+    layout = paths_mod.csdk_layout(root)
+    log(f"· раскладка CSDK: {layout.describe()}")
+    if result is not None:
+        result.say(f"раскладка CSDK: {layout.describe()}")
+    if not layout.has_gameinfo:
+        message = (
+            "в CSDK нет game/citadel/gameinfo.gi — базового мода. Компилятор ищет его, "
+            "чтобы понять, для какого мода собирать аддон: без файла сборка может упасть "
+            "с «Can't find 'game\\citadel\\gameinfo.gi'».\n"
+            "  Сборщик мода (build.bat) умеет закрыть это сам: он кладёт gameinfo.gi из "
+            "установленной игры в дерево CSDK (--no-csdk-gameinfo-repair отключает).\n"
+            "  Если помогает не всегда — в архиве старая раскладка CSDK: возьми текущий "
+            f"Reduced CSDK 12 со страницы {CSDK_PAGE_URL}."
+        )
+        log(f"! {message}")
+        if result is not None:
+            result.say(message)
+    if not layout.has_modules:
+        message = (
+            "рядом с компилятором нет файлов модулей инструментов (modtools.dll и т.п.): "
+            "архив похож на неполный или очень старый. Если компилятор падает с "
+            "«Unable to load module ... error 126», возьми текущий Reduced CSDK 12 "
+            f"({CSDK_PAGE_URL}) или поставь Microsoft Visual C++ Redistributable 2015–2022 (x64)."
+        )
+        log(f"! {message}")
+        if result is not None:
+            result.say(message)
 
 
 def _cached_archive(cache_dir: Path) -> Path | None:
@@ -830,7 +1000,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--csdk", help="уже установленный CSDK (иначе ищем сами)")
     parser.add_argument("--install-dir", help=f"куда распаковать (по умолчанию {default_install_root()})")
     parser.add_argument("--cache-dir", help="куда сложить скачанный архив")
-    parser.add_argument("--url", help="своя ссылка на архив CSDK (по умолчанию — Google Диск со страницы CSDK 12)")
+    parser.add_argument(
+        "--url",
+        action="append",
+        help="своя ссылка на архив CSDK: можно указать несколько (повторяя ключ или через ;) — "
+             "источники пробуются по порядку (по умолчанию — Google Диск со страницы CSDK 12)",
+    )
     parser.add_argument("--sha256", help="контрольная сумма архива (проверка после скачивания)")
     parser.add_argument("--no-download", action="store_true", help="только поиск, не скачивать")
     parser.add_argument("--redownload", action="store_true", help="игнорировать кэш и недокачанный файл")

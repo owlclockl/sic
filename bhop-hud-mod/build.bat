@@ -331,21 +331,54 @@ if "%BUILD_RC%"=="130" goto :build_cancel
 :build_failed
 if "%BUILD_RETRIED%"=="1" goto :build_failed_final
 findstr /i /c:"Unable to load module" /c:"error 126" "%DIST_DIR%\BUILD_REPORT.md" >nul 2>nul
-if not errorlevel 1 goto :repair_csdk
+if not errorlevel 1 goto :module_error_help
 findstr /s /i /c:"Unable to load module" /c:"error 126" "%MOD_DIR%\build\compile_logs\*.log" >nul 2>nul
 if errorlevel 1 goto :build_failed_final
 
-:repair_csdk
+:module_error_help
+rem Nothing is moved or deleted here. The previous build did exactly that and left
+rem the machine without a usable CSDK as soon as the fresh download failed.
 echo.
-echo [!] resourcecompiler hit Windows DLL load error 126 (modtools).
-echo     I will preserve the current CSDK, download a fresh copy, and retry once.
+echo [!] resourcecompiler could not load its own module (modtools, error 126).
+echo     That is a failure of the tools module, not of the mod itself. Typical
+echo     reasons: -game pointed at the installed game (no tools modules there),
+echo     the CSDK tree has no base mod game/citadel/gameinfo.gi, the SDK archive is
+echo     incomplete, or Microsoft Visual C++ Redistributable (x64) is missing.
+echo.
+echo     Nothing was deleted or renamed: your CSDK is untouched. The full text of
+echo     the attempt is in %DIST_DIR%\BUILD_REPORT.md and %MOD_DIR%\build\compile_logs.
+echo.
+if "%NONINTERACTIVE%"=="1" goto :module_error_retry
+echo     [1] Retry the build now (recommended). The builder keeps -game inside the
+echo         CSDK and puts game/citadel/gameinfo.gi there when it is missing, so the
+echo         tools module never has to be loaded from the game install.
+echo     [2] Download a fresh CSDK (the old one stays as *.broken-* next to it)
+echo     [3] Build sources only (--allow-uncompiled: will not work in game)
+echo     [0] Quit
+echo.
+set "ANS="
+set /p "ANS=    Choice [1]: "
+if not defined ANS set "ANS=1"
+if "%ANS%"=="1" goto :module_error_retry
+if "%ANS%"=="2" goto :csdk_redownload
+if "%ANS%"=="3" goto :csdk_allow_uncompiled
+if "%ANS%"=="0" goto :build_failed_final
+goto :module_error_help
+
+:module_error_retry
+set "BUILD_RETRIED=1"
+echo.
+echo [i] Retrying the build...
+goto :do_build
+
+:csdk_redownload
 if not defined CSDK_DIR goto :build_failed_final
 set "BUILD_RETRIED=1"
 set "BROKEN_CSDK=%CSDK_DIR%"
 :choose_csdk_backup
 set "CSDK_BACKUP=%BROKEN_CSDK%.broken-%RANDOM%"
 if exist "%CSDK_BACKUP%" goto :choose_csdk_backup
-echo     Moving broken SDK to: %CSDK_BACKUP%
+echo     Moving the old CSDK to: %CSDK_BACKUP%
 move "%BROKEN_CSDK%" "%CSDK_BACKUP%" >nul
 if errorlevel 1 goto :repair_move_failed
 set "ARG_CSDK_DIR=%BROKEN_CSDK%"
@@ -364,7 +397,15 @@ echo [!] Could not move the old CSDK aside; leaving it untouched.
 goto :build_failed_final
 
 :repair_download_failed
-echo [!] Automatic CSDK repair failed. The old SDK is preserved at %CSDK_BACKUP%.
+echo [!] Automatic CSDK download failed, so the old SDK stays at
+echo     %CSDK_BACKUP%
+echo     (put it back or pass it again with --csdk).
+echo.
+echo     If Google Drive refuses to serve the archive (daily download limit),
+echo     download Reduced CSDK 12 by hand from %CSDK_URL% and either unpack it and
+echo     pass --csdk "C:\Reduced_CSDK_12", or just drop the .zip into the cache:
+echo       %LOCALAPPDATA%\DeadlockModding\csdk-cache
+echo     The builder takes an archive from there without touching the network.
 goto :build_failed_final
 
 :build_failed_final
@@ -835,6 +876,9 @@ echo     --out DIR            where to put artifacts (dist by default)
 echo     --version X.Y.Z      mod version
 echo     --compiler-game PATH folder with gameinfo.gi for -game; only some
 echo                          CSDK builds need it (by default -game is not passed)
+echo     --no-csdk-gameinfo-repair  never copy game/citadel/gameinfo.gi from the
+echo                          game install into the CSDK tree (the builder does
+echo                          that itself when the CSDK has no base mod)
 echo     --allow-uncompiled   build without the compiler (will not work in game)
 echo     --clean              delete build\ and dist\ first
 echo     --test               run the builder's unit tests first

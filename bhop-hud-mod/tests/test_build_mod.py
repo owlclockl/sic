@@ -22,6 +22,7 @@ import _support  # noqa: F401 - добавляет tools/ в sys.path
 from _support import (
     COMPILER_CMD_TEMPLATE,
     FAKE_COMPILER,
+    FIXTURES,
     HUD_FIXTURE,
     PYTHON,
     read_compiler_log,
@@ -584,8 +585,14 @@ class StrictCompilerPipelineTest(PipelineCase):
         self.assertIn("## Ошибки", report)
         self.assertIn("Can't find 'game\\citadel\\gameinfo.gi'", report)
 
-    def test_fallback_to_installed_game_gameinfo(self) -> None:
-        """CSDK, которому -game обязателен: сборщик сам берёт gameinfo.gi из игры."""
+    def test_csdk_without_base_mod_gets_it_from_the_installed_game(self) -> None:
+        """CSDK без базового мода: сборщик кладёт gameinfo.gi в дерево CSDK.
+
+        Раньше на этом месте сборщик передавал ``-game`` на дерево установленной
+        игры. Именно такой вызов и падает в игре с ``Unable to load module modtools
+        ... error 126``: модулей инструментов в установке игры нет. Теперь базовый
+        мод копируется в сам CSDK, и ``-game`` не выходит за его пределы.
+        """
         csdk = write_fake_csdk(self.tmp / "Reduced_CSDK_12", layout="flat")
         game = write_fake_game(self.tmp / "Deadlock", HUD_FIXTURE.read_bytes())
         patcher = mock.patch.dict(os.environ, {"SIC_FAKE_REQUIRE_GAME": "1"})
@@ -594,17 +601,156 @@ class StrictCompilerPipelineTest(PipelineCase):
 
         code, output = _run(self._base(csdk, "--game-path", str(game)))
         self.assertEqual(0, code, output)
+
+        repaired = csdk / "game" / "citadel" / "gameinfo.gi"
+        self.assertTrue(repaired.is_file(), "базовый мод не скопирован в CSDK")
+        self.assertEqual(
+            (game / "game" / "citadel" / "gameinfo.gi").read_bytes(), repaired.read_bytes()
+        )
         invocations = read_compiler_log(self.log)
         first = invocations[0]["argv"]
         fallback = invocations[1]["argv"]
         self.assertNotIn("-game", first)
         self.assertEqual("-game", fallback[fallback.index("-game")])
-        self.assertEqual(str(game / "game" / "citadel"), fallback[fallback.index("-game") + 1])
+        self.assertEqual(str(csdk / "game" / "citadel"), fallback[fallback.index("-game") + 1])
         self.assertIn("не нашёл gameinfo.gi", output)
+        self.assertIn("скопировал gameinfo.gi", output)
         # Результат забираем в build/, в дереве игры ничего не остаётся.
         self.assertEqual([], list((game / "game").rglob("*.vxml_c")))
         report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
         self.assertIn("gameinfo.gi", report)
+        self.assertIn("скопирован из установленной игры", report)
+
+    def test_repair_can_be_turned_off_installed_game_is_last_resort(self) -> None:
+        """``--no-csdk-gameinfo-repair``: дерево игры остаётся последним вариантом."""
+        csdk = write_fake_csdk(self.tmp / "Reduced_CSDK_12", layout="flat")
+        game = write_fake_game(self.tmp / "Deadlock", HUD_FIXTURE.read_bytes())
+        patcher = mock.patch.dict(os.environ, {"SIC_FAKE_REQUIRE_GAME": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        code, output = _run(
+            self._base(csdk, "--game-path", str(game), "--no-csdk-gameinfo-repair")
+        )
+        self.assertEqual(0, code, output)
+        self.assertFalse((csdk / "game" / "citadel" / "gameinfo.gi").exists())
+        invocations = read_compiler_log(self.log)
+        self.assertNotIn("-game", invocations[0]["argv"])
+        fallback = invocations[1]["argv"]
+        self.assertEqual(str(game / "game" / "citadel"), fallback[fallback.index("-game") + 1])
+        # Про такой -game сборщик честно предупреждает: модулей инструментов там нет.
+        self.assertIn("modtools", output)
+        self.assertEqual([], list((game / "game").rglob("*.vxml_c")))
+
+    def test_repaired_base_mod_is_reused_on_the_next_run(self) -> None:
+        """Второй запуск видит уже скопированный базовый мод и не трогает игру."""
+        csdk = write_fake_csdk(self.tmp / "Reduced_CSDK_12", layout="flat")
+        game = write_fake_game(self.tmp / "Deadlock", HUD_FIXTURE.read_bytes())
+        patcher = mock.patch.dict(os.environ, {"SIC_FAKE_REQUIRE_GAME": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        code, _first = _run(self._base(csdk, "--game-path", str(game)))
+        self.assertEqual(0, code)
+        self.log.unlink()
+        code, output = _run(self._base(csdk, "--game-path", str(game)))
+        self.assertEqual(0, code, output)
+        self.assertNotIn("скопировал gameinfo.gi", output)
+        # Базовый мод уже в CSDK: запасной вариант остаётся внутри него, игра не трогается.
+        for invocation in read_compiler_log(self.log):
+            if "-game" in invocation["argv"]:
+                self.assertEqual(
+                    str(csdk / "game" / "citadel"),
+                    invocation["argv"][invocation["argv"].index("-game") + 1],
+                )
+
+
+@needs_posix_compiler
+class ModuleLoadFailureTest(PipelineCase):
+    """``Unable to load module modtools ... error 126`` — не повод бросать сборку.
+
+    Компилятор из CSDK успевает записать ``*_c`` и падает уже на выходе, когда
+    не может загрузить свой модуль инструментов (в установленной игре модулей нет).
+    Раньше сборщик в этом месте останавливался и отправлял перекачивать CSDK; в
+    трекере он так и ушёл перекачивать гигабайты, не собрав мод. Теперь свежий
+    ресурс принимается с предупреждением, а настоящая ошибка компиляции — нет.
+    """
+
+    def _template(self) -> str:
+        return (
+            f'"{PYTHON}" "{FIXTURES / "modtools_compiler.py"}" '
+            "-i {source} -game {game} -nop4 -f"
+        )
+
+    def test_fresh_resource_is_accepted_with_a_warning(self) -> None:
+        csdk = write_fake_csdk(self.tmp / "CSDK", layout="game", gameinfo=True)
+        args = [
+            "--hud-xml", str(HUD_FIXTURE),
+            "--csdk", str(csdk),
+            "--compiler-cmd", self._template(),
+            "--out", str(self.out), "--build-dir", str(self.build),
+            "--steps", "prepare,compile,pack,dmm",
+        ]
+        code, output = _run(args)
+        self.assertEqual(0, code, output)
+        self.assertIn("error 126", output)
+        self.assertIn("успел скомпилироваться", output)
+        entries = [
+            name for name in vpk.open_vpk(self.out / "bhop_trainer_dir.vpk").list_entries()
+            if name.endswith("_c")
+        ]
+        self.assertIn("panorama/layout/hud.vxml_c", entries)
+        self.assertIn("panorama/styles/bhop_trainer.vcss_c", entries)
+
+        report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("Статус: **готов к установке**", report)
+        self.assertIn("не смог загрузить свой модуль (modtools", report)
+        self.assertIn("ресурсы уже были записаны", report)
+
+    def test_no_output_means_a_real_failure(self) -> None:
+        """Модуль не загрузился и ресурса нет — это настоящая ошибка компиляции."""
+        csdk = write_fake_csdk(self.tmp / "CSDK", layout="game", gameinfo=True)
+        patcher = mock.patch.dict(os.environ, {"SIC_FAKE_NO_OUTPUT": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        args = [
+            "--hud-xml", str(HUD_FIXTURE),
+            "--csdk", str(csdk),
+            "--compiler-cmd", self._template(),
+            "--out", str(self.out), "--build-dir", str(self.build),
+            "--steps", "prepare,compile",
+        ]
+        code, output = _run(args)
+        self.assertEqual(2, code, output)
+        report = (self.out / "BUILD_REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("Статус: **ошибка компиляции (VPK не собран)**", report)
+        self.assertIn("Unable to load module modtools", report)
+        # Подсказки должны быть про конкретную машину, а не только «перекачай CSDK».
+        self.assertIn("модулей инструментов", report)
+        self.assertIn("--csdk-redownload", report)
+
+    def test_stale_resource_of_a_previous_run_is_not_accepted(self) -> None:
+        """Прошлогодний ``*_c`` в дереве CSDK не должен спасать упавшую сборку."""
+        csdk = write_fake_csdk(self.tmp / "CSDK", layout="game", gameinfo=True)
+        stale = csdk / "game" / "citadel_addons" / "bhop_trainer" / "panorama" / "layout" / "hud.vxml_c"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        stale.write_bytes(b"STALE-COMPILED")
+        old = 1_000_000_000
+        os.utime(stale, (old, old))
+        patcher = mock.patch.dict(os.environ, {"SIC_FAKE_NO_OUTPUT": "1"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        args = [
+            "--hud-xml", str(HUD_FIXTURE),
+            "--csdk", str(csdk),
+            "--compiler-cmd", self._template(),
+            "--out", str(self.out), "--build-dir", str(self.build),
+            "--steps", "prepare,compile",
+        ]
+        code, output = _run(args)
+        self.assertEqual(2, code, output)
+        self.assertNotIn("успел скомпилироваться", output)
 
 
 class ReportHonestyTest(PipelineCase):
@@ -741,14 +887,32 @@ class BuildBatTest(unittest.TestCase):
                      "--compiler-game"):
             self.assertIn(f'"{flag}"', source)
 
-    def test_batch_retries_after_modtools_dll_error(self) -> None:
-        """Windows launcher quarantines the bad SDK, force-downloads, and retries once."""
+    def test_module_error_does_not_touch_the_working_sdk(self) -> None:
+        """``error 126``: сначала безопасный повтор, а не «перекачать и переименовать».
+
+        Раньше build.bat при первом же упоминании ``Unable to load module`` уносил
+        рабочий CSDK в ``.broken-*`` и шёл качать архив заново. В трекере свежая
+        закачка упёрлась в лимит Google Диска, и машина осталась вообще без CSDK.
+        Теперь переименование и ``--force-install`` возможны только по явному
+        выбору ``[2]``, а по умолчанию сборка просто повторяется.
+        """
         self.assertIn('findstr /i /c:"Unable to load module" /c:"error 126"', self.text)
         self.assertIn('set "BUILD_RETRIED=1"', self.text)
-        self.assertIn('set "FORCE_CSDK_INSTALL=1"', self.text)
-        self.assertIn('--force-install', self.text)
-        self.assertIn('move "%BROKEN_CSDK%" "%CSDK_BACKUP%"', self.text)
         self.assertIn('goto :do_build', self.text)
+        self.assertIn("Nothing was deleted or renamed", self.text)
+        # Спокойный повтор идёт раньше любого перемещения каталога и не качает CSDK.
+        # rindex: те же метки встречаются в меню выше, здесь нужны сами блоки.
+        retry = self.text.rindex(":module_error_retry")
+        redownload = self.text.rindex(":csdk_redownload")
+        move = self.text.index('move "%BROKEN_CSDK%" "%CSDK_BACKUP%"')
+        self.assertLess(retry, move)
+        self.assertLess(redownload, move)
+        self.assertNotIn(":csdk_auto", self.text[retry:redownload])
+        # Принудительная переустановка возможна только внутри явного [2].
+        self.assertIn('set "FORCE_CSDK_INSTALL=1"', self.text[move:])
+        self.assertIn("--force-install", self.text)
+        # Если свежий архив не скачался, лаунчер обязан сказать, куда положить файл.
+        self.assertIn("csdk-cache", self.text)
 
     def test_csdk_layouts_in_bat_match_the_builder(self) -> None:
         """build.bat обязан знать те же раскладки CSDK, что и tools/paths.py."""

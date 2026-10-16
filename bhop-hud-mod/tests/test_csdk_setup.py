@@ -343,6 +343,68 @@ class DownloadTest(unittest.TestCase):
         self.assertIn("подозрительно мал", str(caught.exception))
 
 
+class DriveLimitTest(unittest.TestCase):
+    """Google Диск вместо файла отдаёт страницу про лимит скачиваний.
+
+    Именно на этом встал трекер: сборщик честно скачал архив один раз, потом
+    «починил» CSDK и пошёл качать заново — а Диск отдал не файл, а страницу
+    «Too many users have viewed or downloaded this file». Разбирать там нечего,
+    поэтому сборщик обязан это распознать и внятно объяснить, что делать.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.server = LocalServer()
+        self.addCleanup(self.server.stop)
+
+    def _server_url(self) -> str:
+        return self.server.url
+
+    def test_quota_page_is_explained_not_guessed(self) -> None:
+        self.server.handler.html = (
+            "<html><head><title>Google Drive - Quota exceeded</title></head><body>"
+            "Sorry, you can't view or download this file at this time.<br>"
+            "Too many users have viewed or downloaded this file recently."
+            "</body></html>"
+        )
+        self.server.handler.html_times = 9
+        with self.assertRaises(csdk_setup.CsdkError) as caught:
+            csdk_setup.download(self._server_url(), self.tmp / "cache")
+        message = str(caught.exception)
+        self.assertIn("лимит", message)
+        self.assertIn(csdk_setup.CSDK_PAGE_URL, message)
+        # Подсказка называет реальный каталог кэша: положить архив туда — и готово.
+        self.assertIn(str(self.tmp / "cache"), message)
+
+    def test_blocked_first_source_gives_way_to_the_second(self) -> None:
+        """Своя вторая ссылка должна спасать сборку, если официальная заблокирована."""
+        archive = make_fake_archive(self.tmp / "mirror" / "Reduced_CSDK_12.zip")
+        self.server.handler.html = (
+            "<html><body>Too many users have viewed or downloaded this file recently.</body></html>"
+        )
+        self.server.handler.html_times = 9
+
+        with mock.patch.object(csdk_setup, "MIN_ARCHIVE_BYTES", 1):
+            target = csdk_setup.download_many(
+                [self._server_url(), archive.as_uri()], self.tmp / "cache"
+            )
+        self.assertEqual(archive.read_bytes(), target.read_bytes())
+        # Правильный вывод: второй источник даже не понадобился бы, если бы первый
+        # отдал файл — проверяем, что в него действительно ходили.
+        self.assertTrue(self.server.handler.requests)
+
+    def test_every_source_failing_names_all_of_them(self) -> None:
+        self.server.handler.html = "<html><body>Too many users have downloaded this file.</body></html>"
+        self.server.handler.html_times = 9
+        missing = (self.tmp / "нет-такого.zip").as_uri()
+        with self.assertRaises(csdk_setup.CsdkError) as caught:
+            csdk_setup.download_many([self._server_url(), missing], self.tmp / "cache")
+        message = str(caught.exception)
+        self.assertIn("ни с одного источника", message)
+        self.assertIn("лимит", message)
+
+
 class SevenZipTest(unittest.TestCase):
     """.7z/.rar распаковываются внешним 7-Zip: нет его — должна быть понятная ошибка."""
 
@@ -523,6 +585,34 @@ class EnsureCsdkTest(unittest.TestCase):
             result = csdk_setup.ensure_csdk(install_root=install, log=_quiet)
         self.assertEqual("found", result.status)
         self.assertEqual(install / COMPILER_RELATIVE, result.compiler)
+
+    def test_failed_fresh_download_falls_back_to_the_cached_archive(self) -> None:
+        """``--csdk-redownload`` + лимит Google Диска: работаем на архиве из кэша.
+
+        Так выглядел тупик из трекера: рабочий архив лежал в кэше, сборщик пошёл
+        за свежим, получил страницу про лимит и остался вообще без CSDK (старый
+        каталог к тому моменту уже переименовали в ``.broken-*``).
+        """
+        cache = self.tmp / "cache"
+        archive = make_fake_archive(cache / "Reduced_CSDK_12.zip")
+        install = self.tmp / "install" / "Reduced_CSDK_12"
+        messages: list[str] = []
+
+        def blocked(*args: object, **kwargs: object) -> Path:
+            raise csdk_setup.CsdkError("Google Диск не отдаёт архив: сработал лимит скачиваний")
+
+        with self._nothing_installed(), \
+                mock.patch.object(csdk_setup, "MIN_ARCHIVE_BYTES", 1), \
+                mock.patch.object(csdk_setup, "download_many", blocked):
+            result = csdk_setup.ensure_csdk(
+                install_root=install, cache_dir=cache, redownload=True,
+                log=messages.append,
+            )
+        self.assertEqual("downloaded", result.status, result.messages)
+        self.assertTrue(result.ok)
+        self.assertEqual(install / COMPILER_RELATIVE, result.compiler)
+        self.assertTrue(any("кэш" in message for message in result.messages), result.messages)
+        self.assertTrue(any("свежий архив" in message for message in messages), messages)
 
     def test_cached_archive_is_not_downloaded_again(self) -> None:
         cache = self.tmp / "cache"

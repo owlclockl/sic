@@ -228,6 +228,138 @@ def csdk_gameinfo(csdk_root: Path) -> Path:
     return csdk_game_dir(csdk_root) / "gameinfo.gi"
 
 
+#: Имена наборов бинарников внутри CSDK (в каждом — подкаталог ``win64``).
+CSDK_BIN_NAMES: tuple[str, ...] = ("bin", "bin_cs2", "bin_tools", "bin_server")
+
+#: Файлы модулей инструментов, которые компилятор грузит при старте.
+#:
+#: ``modtools`` — тот самый модуль из ошибки ``Unable to load module modtools
+#: (Dependency of application), error 126``: если такого файла нет ни в одном
+#: наборе бинарников, CSDK неполный (старый архив или недокачанный).
+CSDK_MODULE_FILES: tuple[str, ...] = (
+    "modtools.dll",
+    "toolframework2.dll",
+    "engine2.dll",
+    "materialsystem2.dll",
+)
+
+
+@dataclass(frozen=True)
+class CsdkLayout:
+    """Что на самом деле лежит в CSDK: раскладка, компилятор, базовый мод.
+
+    Нужна не для поиска пути (это делает :func:`csdk_compiler`), а для
+    диагностики: какие наборы бинарников есть, лежит ли ``game/citadel/gameinfo.gi``
+    (без него компилятор не знает, для какого мода собирать), похож ли каталог на
+    неполный/старый архив.
+    """
+
+    root: Path
+    compiler: Path | None
+    compilers: tuple[Path, ...] = ()
+    layout: str = "unknown"  # "game" | "flat" | "unknown"
+    gameinfo: Path | None = None
+    bin_dirs: tuple[Path, ...] = ()
+    module_files: tuple[Path, ...] = ()
+
+    @property
+    def game_dir(self) -> Path:
+        return Path(self.root) / "game" / "citadel"
+
+    @property
+    def has_gameinfo(self) -> bool:
+        return self.gameinfo is not None
+
+    @property
+    def has_modules(self) -> bool:
+        """Есть ли рядом с компилятором файлы модулей инструментов."""
+        return bool(self.module_files)
+
+    def describe(self) -> str:
+        """Одна строка для лога и отчёта."""
+        parts = [f"раскладка: {self.layout}"]
+        if self.compiler is not None:
+            try:
+                parts.append(f"компилятор: {self.compiler.relative_to(self.root).as_posix()}")
+            except ValueError:
+                parts.append(f"компилятор: {self.compiler}")
+        parts.append("game/citadel/gameinfo.gi: " + ("есть" if self.has_gameinfo else "нет"))
+        if self.bin_dirs:
+            listed = ", ".join(
+                sorted(
+                    str(path.relative_to(self.root).as_posix() if self.root in path.parents else path)
+                    for path in self.bin_dirs
+                )
+            )
+            parts.append(f"наборы бинарников: {listed}")
+        if self.compiler is not None:
+            parts.append("модули инструментов: " + ("есть" if self.has_modules else "не найдены"))
+        return "; ".join(parts)
+
+
+def _csdk_bin_dirs(csdk_root: Path) -> tuple[Path, ...]:
+    """Существующие каталоги наборов бинарников (``bin``, ``game/bin_cs2`` и др.)."""
+    found: list[Path] = []
+    for base in (Path(csdk_root), Path(csdk_root) / "game"):
+        for name in CSDK_BIN_NAMES:
+            for candidate in (base / name, base / name / "win64"):
+                if candidate.is_dir() and candidate not in found:
+                    found.append(candidate)
+    return tuple(found)
+
+
+def csdk_layout(csdk_root: Path) -> CsdkLayout:
+    """Описать установку CSDK: раскладку, компилятор(ы) и базовый мод."""
+    csdk_root = Path(csdk_root)
+    compilers: list[Path] = []
+    for relative in COMPILER_RELATIVE_PATHS:
+        candidate = csdk_root / relative
+        if not candidate.is_file():
+            continue
+        if relative.parts[0].startswith("bin") and not _looks_like_csdk_root(csdk_root):
+            continue
+        if candidate not in compilers:
+            compilers.append(candidate)
+
+    layout = "unknown"
+    if compilers:
+        layout = "game" if compilers[0].relative_to(csdk_root).parts[0] == "game" else "flat"
+
+    gameinfo = csdk_gameinfo(csdk_root)
+    bin_dirs = _csdk_bin_dirs(csdk_root)
+    modules: list[Path] = []
+    for directory in bin_dirs:
+        for name in CSDK_MODULE_FILES:
+            candidate = directory / name
+            if candidate.is_file() and candidate not in modules:
+                modules.append(candidate)
+
+    return CsdkLayout(
+        root=csdk_root,
+        compiler=compilers[0] if compilers else None,
+        compilers=tuple(compilers),
+        layout=layout,
+        gameinfo=gameinfo if gameinfo.is_file() else None,
+        bin_dirs=bin_dirs,
+        module_files=tuple(modules),
+    )
+
+
+def missing_vc_runtime_dlls(system_root: Path | None = None) -> list[str]:
+    """Каких DLL из Visual C++ Redistributable нет в ``System32`` (Windows).
+
+    ``error 126`` при загрузке модуля CSDK чаще всего означает именно это: сам
+    ``resourcecompiler.exe`` стартует, а его модуль (``modtools``) не грузится,
+    потому что не хватает зависимости из VC++ Redistributable 2015–2022 (x64).
+    Тест полезен только на Windows; на других системах возвращает пустой список.
+    """
+    if not sys.platform.startswith("win"):
+        return []
+    base = Path(system_root) if system_root else Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    required = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+    return [name for name in required if not (base / "System32" / name).is_file()]
+
+
 def find_dmm_data_dir() -> Path | None:
     """Каталог данных Deadlock Mod Manager (только для отчёта ``check``)."""
     home = Path.home()

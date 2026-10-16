@@ -21,12 +21,16 @@
    ``.vxml_c`` / ``.vcss_c``). Вызов — ``-nop4 -f -i <исходник>``, без
    ``-game``: аддон определяется по пути файла внутри
    ``content/citadel_addons/<addon>``, а ``-game`` ломает сборку на Reduced
-   CSDK 12, где нет ``game/citadel/gameinfo.gi``. Если компилятор конкретной
-   сборки требует ``-game``, сборщик повторит вызов с ``gameinfo.gi``
-   установленной игры, а задать каталог вручную можно ключом
-   ``--compiler-game``. Без компилятора шаг можно пропустить только явным
-   ``--allow-uncompiled`` — тогда артефакты помечаются как «только исходники»
-   и пакет для DMM не собирается.
+   CSDK 12, где нет ``game/citadel/gameinfo.gi``. Поэтому базовый мод при
+   необходимости кладётся в дерево CSDK из установленной игры
+   (``_adopt_csdk_gameinfo``, отключается ``--no-csdk-gameinfo-repair``), а
+   ``-game`` перебирается по порядку: сам CSDK, затем (последним вариантом)
+   дерево игры. Отказ модуля инструментов
+   (``Unable to load module modtools ... error 126``) не считается поломкой
+   CSDK: если ресурс успел записаться, шаг завершается предупреждением, а не
+   требованием перекачать гигабайты архива. Без компилятора шаг можно
+   пропустить только явным ``--allow-uncompiled`` — тогда артефакты помечаются
+   как «только исходники» и пакет для DMM не собирается.
 3. ``pack`` — пакует скомпилированное дерево в VPK v2 (writer совместим с
    Deadlock Mod Manager) и вшивает метаданные ``vpk-modinfo v1``
    (``addoninfo.txt`` + ``modinfo.json``), затем проверяет результат чтением.
@@ -51,6 +55,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -66,9 +71,10 @@ import vanilla_hud  # noqa: E402
 import vpk  # noqa: E402
 
 TOOL = dmm_bundle.MANAGER_ID
-#: 1.1.0: компиляция вызывается без `-game` (см. `_compiler_command`),
-#: у отчёта появился честный статус и разбор ошибок `resourcecompiler`.
-TOOL_VERSION = "1.1.0"
+#: 1.2.0: базовый мод CSDK (game/citadel/gameinfo.gi) починяется на месте,
+#: `-game` перебирается от CSDK к дереву игры, отказ модуля `modtools`
+#: (`error 126`) больше не отправляет перекачивать CSDK, если ресурс записан.
+TOOL_VERSION = "1.2.0"
 
 MOD_TITLE = "Deadlock :: Bhop Trainer HUD"
 MOD_AUTHOR = "owlclockl"
@@ -336,13 +342,19 @@ def _compiler_command(
 
 @dataclass
 class _CompilerResolver:
-    """Где компилятор, где CSDK-деревья и откуда забирать результат."""
+    """Где компилятор, где CSDK-деревья и откуда забирать результат.
+
+    ``gameinfo`` — ``game/citadel/gameinfo.gi`` самого CSDK (базовый мод). Файл
+    есть не в каждом архиве CSDK; если его нет, компилятор не понимает, для какого
+    мода собирать аддон, и падает с «Can't find 'game\\citadel\\gameinfo.gi'».
+    """
 
     compiler: Path | None
     sdk: Path | None
     game_dir: Path | None
     content_root: Path
     output_root: Path
+    gameinfo: Path | None = None
 
 
 @dataclass
@@ -367,12 +379,14 @@ def _resolve_compiler(ctx: Context) -> _CompilerResolver:
         # Своя команда: куда она кладёт результат, решает она сама. Дерево игры
         # передаём, только если оно известно (нужно для подсказок и для поиска
         # результата в дереве игры).
+        sdk = Path(args.csdk).expanduser().resolve() if args.csdk else None
         return _CompilerResolver(
             compiler=None,
-            sdk=Path(args.csdk).expanduser().resolve() if args.csdk else None,
+            sdk=sdk,
             game_dir=Path(args.game_dir) if getattr(args, "game_dir", None) else None,
             content_root=ctx.content_root,
             output_root=ctx.output_root,
+            gameinfo=_existing_gameinfo(sdk),
         )
     csdk = paths_mod.find_csdk(Path(args.csdk) if args.csdk else None)
     if csdk is None:
@@ -387,7 +401,16 @@ def _resolve_compiler(ctx: Context) -> _CompilerResolver:
         game_dir=csdk / "game" / "citadel",
         content_root=csdk / "content" / "citadel_addons" / ctx.addon_name,
         output_root=csdk / "game" / "citadel_addons" / ctx.addon_name,
+        gameinfo=_existing_gameinfo(csdk),
     )
+
+
+def _existing_gameinfo(sdk: Path | None) -> Path | None:
+    """``<CSDK>/game/citadel/gameinfo.gi``, если он там есть."""
+    if sdk is None:
+        return None
+    gameinfo = paths_mod.csdk_gameinfo(sdk)
+    return gameinfo if gameinfo.is_file() else None
 
 
 def _compiled_roots(
@@ -476,15 +499,71 @@ def _fallback_game_dir(ctx: Context) -> Path | None:
     return None
 
 
+def _installed_gameinfo(ctx: Context) -> Path | None:
+    """``gameinfo.gi`` установленной игры — базовый мод с файлами игры."""
+    game = _fallback_game_dir(ctx)
+    if game is None:
+        return None
+    gameinfo = game if game.is_file() else game / "gameinfo.gi"
+    return gameinfo if gameinfo.is_file() else None
+
+
+def _adopt_csdk_gameinfo(ctx: Context, resolver: "_CompilerResolver") -> Path | None:
+    """Положить в CSDK ``game/citadel/gameinfo.gi``, если его там нет.
+
+    ``gameinfo.gi`` — ответ на вопрос «для какого мода собирать»; без него
+    ``resourcecompiler`` падает с
+
+        Application unable to load gameinfo.gi file from directory "game\\citadel"
+        Can't find 'game\\citadel\\gameinfo.gi'
+
+    В установленной игре файл есть всегда, в старых сборках Reduced CSDK 12 — нет.
+    Копия занимает килобайты, саму игру не трогает и делает CSDK самодостаточным:
+    компилятору больше не нужен ``-game`` на дерево игры — а именно этот вариант и
+    приводит к ``Unable to load module modtools ... error 126`` (модулей
+    инструментов в установленной игре нет). Отключается ``--no-csdk-gameinfo-repair``.
+    """
+    if not getattr(ctx.args, "csdk_gameinfo_repair", True):
+        return resolver.gameinfo
+    sdk = resolver.sdk
+    if sdk is None:
+        return resolver.gameinfo
+    target = paths_mod.csdk_gameinfo(sdk)
+    if target.is_file():
+        return target
+    source = _installed_gameinfo(ctx)
+    if source is None:
+        return None
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+    except OSError as error:
+        ctx.warn(f"не удалось положить базовый gameinfo.gi в CSDK ({target}): {error}")
+        return None
+    ctx.note(
+        f"в CSDK не было базового мода — скопировал gameinfo.gi из установленной игры: "
+        f"{source} → {target}"
+    )
+    ctx.state["csdk_gameinfo_repair"] = {"source": str(source), "target": str(target)}
+    return target
+
+
 def _compile_attempts(ctx: Context, resolver: "_CompilerResolver") -> list[_CompileAttempt]:
     """Как пробовать компиляцию, по порядку.
 
-    1. Без ``-game``: так собирают все известные пайплайны сообщества, и это
-       единственный вариант, который работает на Reduced CSDK 12 (там нет
-       ``game/citadel/gameinfo.gi``).
-    2. С ``gameinfo.gi`` установленной игры: страховка для сборок CSDK, которые
-       всё же требуют ``-game``. Результат всё равно забираем в ``build/``, а из
-       дерева игры убираем (см. ``_compiled_roots``).
+    1. Без ``-game``: так собирают известные пайплайны сообщества (QOLLOCK,
+       Deadlock QoL HUD Mod, Deadlock Stats Editor), и аддон определяется по пути
+       исходника внутри ``content/citadel_addons/<addon>``. Работает, когда
+       компилятор находит базовый мод рядом с собой.
+    2. ``-game <CSDK>/game/citadel``: базовый мод самого CSDK. Модули инструментов
+       тоже берутся из CSDK, дерево игры не читается — предпочтительный запасной
+       вариант для сборок, которым ``-game`` всё-таки нужен.
+    3. ``-game <Deadlock>/game/citadel``: ``gameinfo.gi`` установленной игры.
+       Вариант капризный: в игре нет модулей инструментов, поэтому компилятор
+       читает паки игры (шквал предупреждений про ``shaders_pc.vpk``) и падает с
+       ``Unable to load module modtools ... error 126``. Пробуем только если в
+       самом CSDK базового мода нет — и никогда не считаем такой ``126`` поломкой
+       CSDK (см. ``_module_load_hints``).
 
     Явный ``--compiler-game`` отменяет автоопределение: пользователь сам сказал,
     какой каталог передавать.
@@ -494,9 +573,22 @@ def _compile_attempts(ctx: Context, resolver: "_CompilerResolver") -> list[_Comp
         path = Path(explicit).expanduser()
         return [_CompileAttempt(f"-game {path}", path)]
     attempts = [_CompileAttempt("без -game (аддон определяется по пути исходника)")]
+    if resolver.gameinfo is not None:
+        attempts.append(
+            _CompileAttempt(
+                f"-game {resolver.gameinfo.parent} (gameinfo.gi самого CSDK)",
+                resolver.gameinfo.parent,
+            )
+        )
+        return attempts
     game = _fallback_game_dir(ctx)
     if game is not None:
-        attempts.append(_CompileAttempt(f"-game {game} (gameinfo.gi установленной игры)", game))
+        attempts.append(
+            _CompileAttempt(
+                f"-game {game} (gameinfo.gi установленной игры, последний вариант)",
+                game,
+            )
+        )
     return attempts
 
 
@@ -509,23 +601,37 @@ def _run_compiler(ctx: Context, command: list[str], resolver: "_CompilerResolver
     )
 
 
-def _gameinfo_hints() -> list[str]:
+def _gameinfo_hints(resolver: "_CompilerResolver") -> list[str]:
     """Что делать, если компилятор не нашёл ``gameinfo.gi`` (текст идёт в отчёт)."""
-    return [
+    lines = [
         "Причина похожа на «компилятор не понял, для какого мода собирать»: он искал",
-        'game\\citadel\\gameinfo.gi, а в Reduced CSDK 12 файлов самой игры нет — там только',
-        "инструменты, content/citadel_addons и game/citadel_addons. Аддон определяется по пути",
-        "исходника внутри content/citadel_addons/<addon>, поэтому -game передавать не нужно.",
+        'game\\citadel\\gameinfo.gi — базовый мод. Аддон определяется по пути исходника',
+        "внутри content/citadel_addons/<addon>, поэтому -game для этого не нужен: файл",
+        "должен лежать в самом CSDK (в старых архивах Reduced CSDK 12 его нет).",
         "",
         "Что делать:",
+    ]
+    if resolver.sdk is not None and not resolver.gameinfo:
+        lines += [
+            " • сборщик копирует отсутствующий game/citadel/gameinfo.gi из установленной игры",
+            "   автоматически — убедись, что не передан --no-csdk-gameinfo-repair и что игра",
+            "   найдена (--game-path); файл кладётся в дерево CSDK, сама игра не меняется;",
+        ]
+    else:
+        lines += [
+            " • проверить базовый мод в CSDK: <CSDK>/game/citadel/gameinfo.gi должен существовать",
+            "   (сборщик кладёт его туда сам, если игры нет рядом — см. --game-path);",
+        ]
+    lines += [
         " • убедиться, что -game не задан (--compiler-game и -game в --compiler-cmd);",
         " • если конкретной сборке CSDK -game всё же нужен — указать каталог с gameinfo.gi:",
-        '     --compiler-game "…\\Deadlock\\game\\citadel"',
+        '     --compiler-game "…\\Deadlock\\game\\citadel" (или <CSDK>\\game\\citadel)',
         " • либо задать всю команду самому:",
         '     --compiler-cmd "«{compiler}» -nop4 -f -i {source}"',
         " • проверить, что исходники лежат внутри content/citadel_addons/<addon> (шаг prepare)",
         "   и что CSDK распакован целиком: python3 tools/csdk_setup.py --csdk PATH",
     ]
+    return lines
 
 
 #: Сколько строк вывода компилятора показываем: начало, хвост и ключевые строки из середины.
@@ -557,22 +663,80 @@ def _output_excerpt(output: str) -> list[str]:
     )
 
 
-def _csdk_damaged_hints() -> list[str]:
-    """Что делать, если компилятор не смог загрузить собственный модуль (error 126)."""
-    return [
-        "Причина похожа на сломанную установку CSDK: resourcecompiler не смог загрузить свой",
-        "модуль (modtools, «error 126» = не найдена DLL или её зависимость). Частые причины:",
-        " • CSDK распакован не полностью или архив повреждён;",
-        " • не хватает Microsoft Visual C++ Redistributable (x64) — одна из типичных причин 126;",
-        " • CSDK лежит в OneDrive/Desktop/Documents, где антивирус или синхронизация мешают.",
+def _module_load_hints(
+    ctx: Context,
+    resolver: "_CompilerResolver",
+    attempts: list[_CompileAttempt],
+) -> list[str]:
+    """Что делать, если компилятор не смог загрузить собственный модуль (error 126).
+
+    Текст подсказок зависит от того, что реально видно на машине: какие варианты
+    ``-game`` пробовали, есть ли в CSDK базовый мод, лежат ли в ``System32`` DLL
+    из VC++ Redistributable. Раньше здесь было безусловное «перекачай CSDK» — из-за
+    этого сборщик уходил качать гигабайты даже когда причина была в ``-game``.
+    """
+    lines = [
+        "resourcecompiler не смог загрузить свой модуль (modtools, «error 126» = не найдена",
+        "DLL или её зависимость). Это отказ модуля инструментов, а не компиляции ресурса.",
+    ]
+
+    for attempt in attempts:
+        if attempt.game is None:
+            continue
+        if resolver.sdk is not None and Path(resolver.sdk) in Path(attempt.game).parents:
+            continue  # вариант внутри CSDK: модули инструментов на месте
+        lines += [
+            "",
+            f" • Вариант «{attempt.label}» указывает на дерево вне CSDK (обычно это",
+            "   установленная игра): инструментов и их модулей там нет, поэтому «126» в",
+            "   конце вывода — ожидаемый итог именно этого варианта, а не поломка CSDK.",
+            "   Не передавай -game на дерево игры: базовый мод (game/citadel/gameinfo.gi)",
+            "   должен лежать в самом CSDK.",
+        ]
+
+    if resolver.sdk is not None:
+        layout = paths_mod.csdk_layout(resolver.sdk)
+        if not layout.has_gameinfo:
+            lines += [
+                "",
+                " • В CSDK нет game/citadel/gameinfo.gi (базового мода), поэтому сборщик и",
+                "   пробовал -game на дерево игры. Запусти сборку без --no-csdk-gameinfo-repair:",
+                "   сборщик сам положит gameinfo.gi в дерево CSDK, и -game станет не нужен.",
+            ]
+        if not layout.has_modules:
+            lines += [
+                "",
+                " • Рядом с компилятором нет файлов модулей инструментов (modtools.dll и др.):",
+                "   архив CSDK неполный или старый. Возьми текущий Reduced CSDK 12",
+                f"   ({csdk_setup.CSDK_PAGE_URL}) — свежий архив кладёт базовый мод и модули в сам CSDK.",
+            ]
+
+    missing = paths_mod.missing_vc_runtime_dlls()
+    if missing:
+        lines += [
+            "",
+            " • В System32 нет: " + ", ".join(missing) + ".",
+            "   Поставь Microsoft Visual C++ Redistributable 2015–2022 (x64) и повтори сборку —",
+            "   для «error 126» это самая частая причина на Windows.",
+        ]
+    elif sys.platform.startswith("win"):
+        lines += [
+            "",
+            " • DLL из VC++ Redistributable в System32 на месте, поэтому дело скорее в самом",
+            "   CSDK: проверь, что он распакован целиком и лежит вне OneDrive/Desktop/Documents.",
+        ]
+
+    lines += [
         "",
         "Что делать:",
-        r" • переименовать или удалить каталог %LOCALAPPDATA%\DeadlockModding\Reduced_CSDK_12:",
-        "   поиск CSDK берёт его первым, даже если он сломан; затем запустить сборку с",
-        "   --csdk-redownload (архив скачается заново, а не возьмётся из кэша);",
-        " • установить VC++ Redistributable 2015–2022 (x64) и повторить сборку;",
+        " • повторить сборку без правок: варианты вызова и лечение CSDK уже учтены",
+        "   (кэш архива и существующая установка при этом не трогаются);",
+        " • если не помогло — свежий архив: build.bat --csdk-redownload",
+        r"   (или удалить %LOCALAPPDATA%\DeadlockModding\Reduced_CSDK_12 и запустить сборку снова);",
+        " • или указать рабочий CSDK вручную: build.bat --csdk \"…\\Reduced_CSDK_12\".",
         " • журнал полностью: папка build\\compile_logs (см. ссылки ниже).",
     ]
+    return lines
 
 
 def _is_csdk_damaged(text: str) -> bool:
@@ -586,6 +750,7 @@ def _compiler_failure_message(
     result: "subprocess.CompletedProcess[str]",
     command: list[str],
     attempts: list[_CompileAttempt],
+    resolver: "_CompilerResolver",
 ) -> str:
     """Понятный текст ошибки компиляции вместо одного кода возврата."""
     lines = [
@@ -601,10 +766,10 @@ def _compiler_failure_message(
         lines.append(f"  журнал попытки «{entry['attempt']}» (код {entry['returncode']}): {entry['log']}")
     if _gameinfo_trouble(result):
         lines.append("")
-        lines += [f"  {line}" if line else "" for line in _gameinfo_hints()]
+        lines += [f"  {line}" if line else "" for line in _gameinfo_hints(resolver)]
     if _is_csdk_damaged(output):
         lines.append("")
-        lines += [f"  {line}" if line else "" for line in _csdk_damaged_hints()]
+        lines += [f"  {line}" if line else "" for line in _module_load_hints(ctx, resolver, attempts)]
     return "\n".join(lines)
 
 
@@ -675,6 +840,15 @@ def step_compile(ctx: Context) -> None:
     # другой причине, и качать гигабайтный архив было бы незачем.
     _ensure_csdk(ctx)
     resolver = _resolve_compiler(ctx)
+    # Базовый мод (game/citadel/gameinfo.gi) внутри CSDK: без него компилятор не
+    # знает, для какого мода собирать аддон, и сборщик был вынужден указывать
+    # -game на дерево установленной игры — а это и есть источник «error 126».
+    if resolver.sdk is not None and not ctx.args.compiler_cmd:
+        repaired = _adopt_csdk_gameinfo(ctx, resolver)
+        if repaired is not None:
+            resolver.gameinfo = repaired
+        layout = paths_mod.csdk_layout(resolver.sdk)
+        ctx.note(f"раскладка CSDK: {layout.describe()}")
     if resolver.compiler is None and not ctx.args.compiler_cmd:
         if not ctx.args.allow_uncompiled:
             ctx.state["compile_skipped"] = True
@@ -722,7 +896,7 @@ def step_compile(ctx: Context) -> None:
                 'с «Can\'t find \'game\\citadel\\gameinfo.gi\'». Если сборка не нуждается в -game, '
                 "убери --compiler-game."
             )
-    _note_attempts(ctx, attempts)
+    _note_attempts(ctx, attempts, resolver)
     ctx.state["compile_attempts"] = [attempt.label for attempt in attempts]
 
     roots = _compiled_roots(ctx, resolver, game_dir=game_dir)
@@ -738,23 +912,32 @@ def step_compile(ctx: Context) -> None:
     for source in sources:
         relative = source.relative_to(ctx.content_root)
         expected_ext = COMPILED_EXTENSIONS.get(relative.suffix.lower())
+        started = time.time()
         result, command, used = _compile_one(ctx, source, relative, resolver, attempts)
         if result.returncode != 0:
-            message = _compiler_failure_message(ctx, relative, result, command, attempts)
-            final_output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
-            ctx.state["compile_error"] = {
-                "source": relative.as_posix(),
-                "returncode": result.returncode,
-                "command": shlex.join(command),
-                "output": _output_excerpt(final_output),
-                "attempts": [attempt.label for attempt in attempts],
-                "attempt_logs": _attempt_logs_for(ctx, relative),
-                "hints": (
-                    (_gameinfo_hints() if _gameinfo_trouble(result) else [])
-                    + (_csdk_damaged_hints() if _is_csdk_damaged(final_output) else [])
-                ) or None,
-            }
-            raise SystemExit(message)
+            salvaged = _salvage_after_module_error(
+                ctx, source, relative, resolver, expected_ext, roots, before, result, started
+            )
+            if salvaged is None:
+                message = _compiler_failure_message(ctx, relative, result, command, attempts, resolver)
+                final_output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+                ctx.state["compile_error"] = {
+                    "source": relative.as_posix(),
+                    "returncode": result.returncode,
+                    "command": shlex.join(command),
+                    "output": _output_excerpt(final_output),
+                    "attempts": [attempt.label for attempt in attempts],
+                    "attempt_logs": _attempt_logs_for(ctx, relative),
+                    "hints": (
+                        (_gameinfo_hints(resolver) if _gameinfo_trouble(result) else [])
+                        + (_module_load_hints(ctx, resolver, attempts) if _is_csdk_damaged(final_output) else [])
+                    ) or None,
+                }
+                raise SystemExit(message)
+            if expected_ext is None:
+                continue
+            produced.append(salvaged)
+            continue
         if used is not None and used.game is not None and not ctx.state.get("compiler_game"):
             ctx.state["compiler_game"] = str(used.game)
         if expected_ext is None:
@@ -767,7 +950,11 @@ def step_compile(ctx: Context) -> None:
     _write_state(ctx)
 
 
-def _note_attempts(ctx: Context, attempts: list[_CompileAttempt]) -> None:
+def _note_attempts(
+    ctx: Context,
+    attempts: list[_CompileAttempt],
+    resolver: "_CompilerResolver",
+) -> None:
     """Записать в отчёт, какими вызовами будем компилировать."""
     if ctx.args.compiler_cmd:
         return
@@ -783,14 +970,25 @@ def _note_attempts(ctx: Context, attempts: list[_CompileAttempt]) -> None:
             "(аддон определяется по пути исходника в content/citadel_addons/<addon>)"
         )
         ctx.note(
-            "запасной вариант при ошибке с gameinfo.gi: --compiler-game "
-            '"<Deadlock>\\game\\citadel"'
+            "запасной вариант при ошибке с gameinfo.gi: базовый мод самого CSDK "
+            "(<CSDK>/game/citadel) или --compiler-game"
         )
         return
     ctx.note(
         "вызов компилятора: -nop4 -f -i <файл>; если CSDK потребует gameinfo.gi — "
-        f"повторю с -game {attempts[1].game}"
+        f"повторю с -game {attempts[1].game} ({attempts[1].label})"
     )
+    for attempt in attempts:
+        if attempt.game is None:
+            continue
+        if resolver.sdk is not None and Path(resolver.sdk) in Path(attempt.game).parents:
+            continue  # вариант внутри CSDK: модули инструментов на месте
+        ctx.warn(
+            f"вариант «-game {attempt.game}» указывает на дерево установленной игры: модулей "
+            "инструментов в ней нет, и такой вызов часто заканчивается «Unable to load module "
+            "modtools ... error 126» уже после компиляции. Это не поломка CSDK — базовый мод "
+            "должен лежать в самом CSDK (game/citadel/gameinfo.gi)."
+        )
 
 
 def _compile_one(
@@ -836,6 +1034,48 @@ def _compile_one(
     return result, command, None
 
 
+def _salvage_after_module_error(
+    ctx: Context,
+    source: Path,
+    relative: Path,
+    resolver: "_CompilerResolver",
+    expected_ext: str | None,
+    roots: list[_CompiledRoot],
+    before: dict[Path, tuple[int, int] | None],
+    result: "subprocess.CompletedProcess[str]",
+    started: float,
+) -> Path | None:
+    """Принять ресурс, если компилятор упал уже после того, как его записал.
+
+    ``Unable to load module modtools ... error 126`` — отказ модуля инструментов на
+    выходе, а не ошибка компиляции: ``resourcecompiler`` печатает шквал предупреждений
+    про шейдеры, пишет ``*_c`` и возвращает код 1. Ровно это и случилось в трекере:
+    ресурс был готов, а сборка останавливалась, и пользователь уходил перекачивать
+    CSDK. Берём только файл, созданный **этим** запуском (``started``) — иначе можно
+    подсунуть в VPK вчерашний ресурс.
+    """
+    if expected_ext is None or not _is_csdk_damaged(
+        "\n".join(part for part in (result.stdout, result.stderr) if part)
+    ):
+        return None
+    try:
+        target = _take_compiled(
+            ctx, relative, expected_ext, roots, before, source, not_before=started
+        )
+    except SystemExit:
+        return None
+    ctx.warn(
+        f"{relative.as_posix()}: resourcecompiler завершился кодом {result.returncode} и не смог "
+        "загрузить свой модуль (modtools, «error 126»), но ресурс успел скомпилироваться: "
+        f"{_rel(target, ctx.build_dir)}. Шаг считаю выполненным — если игра не покажет панель, "
+        "почини CSDK (подсказки в отчёте)."
+    )
+    ctx.state.setdefault("compile_accepted_with_module_error", []).append(relative.as_posix())
+    if resolver.sdk is not None:
+        ctx.state.setdefault("compile_module_error_sdk", str(resolver.sdk))
+    return target
+
+
 def _take_compiled(
     ctx: Context,
     relative: Path,
@@ -843,6 +1083,8 @@ def _take_compiled(
     roots: list[_CompiledRoot],
     before: dict[Path, tuple[int, int] | None],
     source: Path,
+    *,
+    not_before: float | None = None,
 ) -> Path:
     """Найти скомпилированный ресурс, забрать его в ``build/game/...`` и вернуть путь."""
     compiled_name = relative.with_suffix(expected_ext)
@@ -854,6 +1096,9 @@ def _take_compiled(
         if signature is None or signature[1] == 0:
             continue
         if root.fresh_only and signature == before.get(candidate):
+            continue
+        if not_before is not None and signature[0] < int(not_before * 1e9) - 2_000_000_000:
+            # Файл старше этого запуска (запас 2 с — на гранулярность ФС): не наш.
             continue
         found = candidate
         if candidate != target:
@@ -1156,7 +1401,7 @@ def _compile_notes(ctx: Context) -> list[str]:
         return [
             f"- Компиляция подменена шаблоном `--compiler-cmd`: `{args.compiler_cmd}` — "
             "`*_c` создаёт не `resourcecompiler.exe`, а эта команда.",
-        ]
+        ] + _shared_compile_notes(ctx)
     if ctx.state.get("uncompiled") or ctx.state.get("compile_skipped"):
         return [
             "- Компиляция не выполнялась: артефакты содержат сырые `.xml`/`.vcss`, "
@@ -1175,6 +1420,27 @@ def _compile_notes(ctx: Context) -> list[str]:
         notes.append(
             f"- Использован `-game {ctx.state['compiler_game']}` (запасной вариант: без него "
             "компилятор не нашёл `gameinfo.gi`)."
+        )
+    return notes + _shared_compile_notes(ctx)
+
+
+def _shared_compile_notes(ctx: Context) -> list[str]:
+    """Заметки о компиляции, которые нужны при любой команде компилятора."""
+    notes: list[str] = []
+    repair = ctx.state.get("csdk_gameinfo_repair")
+    if repair:
+        notes.append(
+            f"- В дереве CSDK не было базового мода: `gameinfo.gi` скопирован из установленной "
+            f"игры (`{repair.get('source')}` → `{repair.get('target')}`). Сама игра не изменялась;"
+            " отключается ключом `--no-csdk-gameinfo-repair`."
+        )
+    accepted = ctx.state.get("compile_accepted_with_module_error")
+    if accepted:
+        notes.append(
+            "- Компилятор завершился кодом 1 (`Unable to load module modtools`, `error 126`), но "
+            "ресурсы уже были записаны и попали в VPK: "
+            + ", ".join(f"`{item}`" for item in accepted)
+            + ". Такой отказ относится к модулю инструментов, а не к компиляции."
         )
     compile_error = ctx.state.get("compile_error")
     if compile_error:
@@ -1342,7 +1608,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--csdk-install-dir", help="куда распаковать скачанный CSDK (по умолчанию — вне OneDrive)")
     parser.add_argument("--csdk-cache-dir", help="куда сложить скачанный архив CSDK")
-    parser.add_argument("--csdk-url", help="своя ссылка на архив CSDK (по умолчанию — со страницы CSDK 12)")
+    parser.add_argument(
+        "--csdk-url",
+        action="append",
+        help="своя ссылка на архив CSDK; можно указать несколько (повторяя ключ или через ;) — "
+             "источники пробуются по порядку (по умолчанию — со страницы CSDK 12)",
+    )
     parser.add_argument("--csdk-sha256", help="контрольная сумма архива CSDK")
     parser.add_argument("--csdk-redownload", action="store_true", help="скачать CSDK заново, игнорируя кэш")
     parser.add_argument(
@@ -1354,6 +1625,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--compiler-game",
         help="каталог с gameinfo.gi (или сам файл) для -game — нужен только тем сборкам CSDK, "
              "которые не компилируют без него; по умолчанию -game не передаётся",
+    )
+    parser.add_argument(
+        "--no-csdk-gameinfo-repair",
+        dest="csdk_gameinfo_repair",
+        action="store_false",
+        help="не класть game/citadel/gameinfo.gi в дерево CSDK, даже если его там нет "
+             "(иначе сборщик копирует базовый мод из установленной игры)",
     )
     parser.add_argument(
         "--compiler-cmd",
