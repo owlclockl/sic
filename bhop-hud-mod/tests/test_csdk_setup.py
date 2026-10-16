@@ -453,6 +453,30 @@ class EnsureCsdkTest(unittest.TestCase):
         self.assertEqual(install / COMPILER_RELATIVE, result.compiler)
         self.assertIsNotNone(paths.csdk_compiler(install))
 
+    def test_force_install_ignores_existing_sdk_and_reinstalls_at_target(self) -> None:
+        install = self.tmp / "install"
+        old_compiler = install / COMPILER_RELATIVE
+        old_compiler.parent.mkdir(parents=True)
+        old_compiler.write_bytes(b"old broken compiler")
+        with TemporaryDirectory() as tmp:
+            archive = make_fake_archive(Path(tmp) / "Reduced_CSDK_12.zip")
+
+            def fake_download(url: str, directory: Path, **kwargs: object) -> Path:
+                return archive
+
+            with mock.patch.object(
+                csdk_setup.paths_mod, "find_csdk",
+                side_effect=AssertionError("force install must not discover another SDK"),
+            ), mock.patch.object(csdk_setup, "download", fake_download):
+                result = csdk_setup.ensure_csdk(
+                    install_root=install, cache_dir=self.tmp / "cache",
+                    force_install=True, redownload=True, log=_quiet,
+                )
+
+        self.assertEqual("downloaded", result.status, result.messages)
+        self.assertEqual(install / COMPILER_RELATIVE, result.compiler)
+        self.assertEqual(b"MZ fake resourcecompiler", result.compiler.read_bytes())
+
     def test_download_error_is_returned_not_raised(self) -> None:
         with self._nothing_installed():
             with mock.patch.object(csdk_setup, "download",

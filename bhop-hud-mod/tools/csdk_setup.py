@@ -702,6 +702,7 @@ def ensure_csdk(
     cache_dir: Path | str | None = None,
     allow_download: bool = True,
     redownload: bool = False,
+    force_install: bool = False,
     allow_tool_install: bool = True,
     timeout: int = DEFAULT_TIMEOUT,
     log: Callable[[str], None] | None = None,
@@ -710,12 +711,14 @@ def ensure_csdk(
     """Найти CSDK, а если его нет — скачать и установить.
 
     Порядок: явный ``--csdk`` → переменные окружения и типичные места
-    (``paths.find_csdk``) → скачивание в ``install_root``.
+    (``paths.find_csdk``) → скачивание в ``install_root``. ``force_install``
+    отключает поиск существующих копий и предназначен для восстановления
+    повреждённой установки из доверенного архива.
     """
     log = log or (lambda message: None)
     result = SetupResult()
 
-    found = paths_mod.find_csdk(Path(explicit) if explicit else None)
+    found = None if force_install else paths_mod.find_csdk(Path(explicit) if explicit else None)
     if found is not None:
         result.status = "found"
         result.root = Path(found)
@@ -738,7 +741,7 @@ def ensure_csdk(
     # Распаковывали ли сюда раньше. Каталог по умолчанию paths.find_csdk видит
     # и сам, а вот свой --csdk-install-dir надо проверить отдельно: иначе каждый
     # запуск заново разворачивал бы архив.
-    compiler = paths_mod.csdk_compiler(target_root)
+    compiler = None if force_install else paths_mod.csdk_compiler(target_root)
     if compiler is not None:
         result.status = "found"
         result.root = target_root
@@ -831,6 +834,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sha256", help="контрольная сумма архива (проверка после скачивания)")
     parser.add_argument("--no-download", action="store_true", help="только поиск, не скачивать")
     parser.add_argument("--redownload", action="store_true", help="игнорировать кэш и недокачанный файл")
+    parser.add_argument("--force-install", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-tool-install", action="store_true", help="не ставить 7-Zip через winget")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="таймаут сети, секунды")
     parser.add_argument("--root-file", help="записать путь к найденному CSDK в этот файл (для build.bat)")
@@ -853,6 +857,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sha256=args.sha256,
             allow_download=not args.no_download,
             redownload=args.redownload,
+            force_install=args.force_install,
             allow_tool_install=not args.no_tool_install,
             timeout=args.timeout,
             log=log,
