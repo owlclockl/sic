@@ -177,6 +177,38 @@ class PackWithoutCompileTest(PipelineCase):
         self.assertEqual(2, code, output)
         self.assertIn("--compiled-from", output)
 
+    def test_pack_refuses_compiled_style_without_compiled_hud_layout(self) -> None:
+        csdk = self.tmp / "CSDK"
+        addon = csdk / "game" / "citadel_addons" / "bhop_trainer"
+        styles = addon / "panorama" / "styles"
+        styles.mkdir(parents=True)
+        (styles / "bhop_trainer.vcss_c").write_bytes(b"compiled-styles")
+        code, output = _run([
+            "--hud-xml", str(HUD_FIXTURE), "--csdk", str(csdk),
+            "--steps", "prepare,pack", "--out", str(self.out), "--build-dir", str(self.build),
+        ])
+        self.assertEqual(2, code, output)
+        self.assertIn("panorama/layout/hud.vxml_c", output)
+        self.assertIn("Unable to load layout file", output)
+        self.assertFalse((self.out / "bhop_trainer_dir.vpk").exists())
+
+    def test_pack_refuses_empty_compiled_required_resource(self) -> None:
+        csdk = self.tmp / "CSDK"
+        addon = csdk / "game" / "citadel_addons" / "bhop_trainer"
+        layout = addon / "panorama" / "layout"
+        styles = addon / "panorama" / "styles"
+        layout.mkdir(parents=True)
+        styles.mkdir(parents=True)
+        (layout / "hud.vxml_c").write_bytes(b"")
+        (styles / "bhop_trainer.vcss_c").write_bytes(b"compiled-styles")
+        code, output = _run([
+            "--hud-xml", str(HUD_FIXTURE), "--csdk", str(csdk),
+            "--steps", "prepare,pack", "--out", str(self.out), "--build-dir", str(self.build),
+        ])
+        self.assertEqual(2, code, output)
+        self.assertIn("обязательные ресурсы пусты", output)
+        self.assertFalse((self.out / "bhop_trainer_dir.vpk").exists())
+
 
 class FullPipelineTest(PipelineCase):
     def test_builds_vpk_bundle_and_report(self) -> None:

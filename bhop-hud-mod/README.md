@@ -348,6 +348,8 @@ python3 tools/trace_log.py --repair logs/build-20261016-155221.log
 | `SHA256SUMS.txt` | Контрольные суммы артефактов |
 | `BUILD_REPORT.md` | Отчёт: честный статус (включая «ошибка компиляции» с командой и выводом `resourcecompiler`), входные хеши, что попало в VPK, заметки и предупреждения |
 
+**Проверки перед установкой:** сборщик требует в VPK оба непустых скомпилированных ресурса — `panorama/layout/hud.vxml_c` и `panorama/styles/bhop_trainer.vcss_c`. `stage`, `direct` и `verify` дополнительно читают эти записи и проверяют CRC. Неполный пакет не будет выложен или установлен. Прямое обновление заменяет старую копию на том же `pakNN` с резервной копией, а не оставляет старую версию перехватывать HUD; установка останавливается, если Deadlock запущен или найден экземпляр, управляемый DMM.
+
 Рабочие файлы (не коммитятся): `build/content/citadel_addons/<addon>` — дерево аддона для CSDK,
 `build/game/citadel_addons/<addon>` — скомпилированные ресурсы, `build/vanilla/hud.xml` — копия
 ванильного файла, из которого делался патч (она же кэш для следующих сборок),
@@ -383,11 +385,15 @@ python3 tools/install_dmm.py direct --dry-run   # посмотреть план
 python3 tools/install_dmm.py direct             # свободный слот pakNN_dir.vpk + строка в gameinfo.gi
 ```
 
-`direct` копирует VPK в `game/citadel/addons/pakNN_dir.vpk` (первый свободный слот 1–99) и
-добавляет в `gameinfo.gi` строку `Game citadel/addons` со своим маркером-комментарием,
-предварительно сохранив копию `gameinfo.gi.bhop-bak-<дата>`. Перед записью проверяется баланс
-фигурных скобок: сломанный `gameinfo.gi` не даёт игре запуститься, поэтому при подозрении правка
-отменяется. Откат — `install_dmm.py uninstall`, при необходимости `--restore-gameinfo`.
+`direct` сначала проверяет, что VPK читается и в нём есть оба обязательных compiled-ресурса с верным CRC.
+На первой установке выбирается свободный `pakNN_dir.vpk` (слоты 1–99); при повторной — старый прямой
+слот обновляется на месте, а его VPK сохраняется как `pakNN_dir.vpk.bhop-backup-<дата>`. Лишние старые
+прямые копии удаляются после установки. Команда откажется менять файлы, если Deadlock запущен или если
+наш HUD обнаружен в подпапке/профиле DMM — такие экземпляры нужно обновлять через DMM, чтобы не оставить
+две конкурирующие версии. Если в `gameinfo.gi` ещё нет строки `Game citadel/addons`, установщик добавит её со своим маркером;
+перед правкой проверит баланс фигурных скобок и сохранит `gameinfo.gi.bhop-bak-<дата>`.
+Откат установки — `install_dmm.py uninstall --restore-gameinfo`; резервный VPK останется на месте, его
+можно вернуть вручную после удаления установленной версии.
 
 Конфиги самого тренажёра (`.cfg` из соседней папки `bhop-trainer/`) в VPK не влезают и менеджером
 не ставятся, поэтому для них отдельная команда:
@@ -605,6 +611,7 @@ python3 -m unittest discover -s tests -p "test_*.py"
 | Симптом | Причина / решение |
 |---|---|
 | Панели нет в игре | Прогони `python3 tools/install_dmm.py verify`: он показывает, найден ли VPK в `citadel/addons` и есть ли строка `Game citadel/addons` в `gameinfo.gi` |
+| `FATAL ERROR: Unable to load layout file 'file://{resources}/layout/hud.xml'` | Игра не загрузила основной Panorama layout. Отключи Bhop Trainer HUD в DMM. При прямой установке из папки `bhop-hud-mod` запусти `py -3 tools/install_dmm.py uninstall --restore-gameinfo` (Windows) или `python3 tools/install_dmm.py uninstall --restore-gameinfo` (Linux/Proton). Затем проверь целостность Deadlock через Steam. Если ванильная игра запускается, пересобери после патча с `build.bat --refresh-hud-xml` и повторно импортируй пакет. Сборщик и установщик теперь отказываются выпускать/ставить VPK без непустых `hud.vxml_c` и `bhop_trainer.vcss_c`, но проверка структуры не заменяет проверку целостности игры. Не удаляй VPK других модов. |
 | Мод импортировался в DMM, но не работает | Скорее всего игра была запущена: DMM не патчит `gameinfo.gi` при живом `citadel.exe`. Закрой игру и нажми **Launch modded** |
 | `resourcecompiler` падает: `Can't find 'game\citadel\gameinfo.gi'` | Сборщик передал `-game` сборке CSDK, в которой нет файлов игры (обычно Reduced CSDK 12). Убери `--compiler-game` и `-game` из `--compiler-cmd`: компилятор определяет аддон по пути исходника в `content/citadel_addons/<addon>`. Если CSDK без `-game` не работает — укажи каталог с настоящим `gameinfo.gi`: `--compiler-game "<Deadlock>\game\citadel"` |
 | CSDK найден, но «не найден с resourcecompiler.exe» | CSDK распакован не целиком или лежит во вложенной папке. Сборщик ищет компилятор в `game/bin_*` и в корневых `bin_*`; проверь `python3 tools/csdk_setup.py --csdk PATH` или укажи корень CSDK (тот, где рядом лежат `content/` и `game/`) |

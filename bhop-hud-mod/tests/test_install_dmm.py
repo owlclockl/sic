@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 import _support  # noqa: F401 - добавляет tools/ в sys.path
 from _support import write_fake_game
 
+import dmm_bundle
 import gameinfo
 import install_dmm
 import paths
@@ -134,6 +135,17 @@ class SlotsAndDetectionTest(FakeGameCase):
         self.assertEqual(1, len(found))
         self.assertFalse(found[0].compiled)
 
+    def test_find_installed_mods_detects_our_incomplete_vpk_by_metadata(self) -> None:
+        import modinfo
+
+        raw = vpk.build_vpk({"panorama/layout/hud.vxml_c": b"compiled-layout"})
+        imprinted, _ = modinfo.imprint(raw, title="Bhop Trainer HUD")
+        (self.addons / "pak06_dir.vpk").write_bytes(imprinted)
+        found = install_dmm.find_installed_mods(self.game)
+        self.assertEqual(1, len(found))
+        self.assertFalse(found[0].compiled)
+        self.assertEqual("Bhop Trainer HUD", found[0].title)
+
     def test_env_report_finds_game_dir_by_explicit_path(self) -> None:
         found = paths.find_game_dir(self.game)
         self.assertEqual(self.game, found)
@@ -175,6 +187,13 @@ class CommandTest(FakeGameCase):
         self.assertEqual(1, code, output)
         self.assertIn("исходники", output)
 
+    def test_verify_flags_missing_compiled_hud_layout(self) -> None:
+        self.install_mod("pak01_dir.vpk", {"panorama/styles/bhop_trainer.vcss_c": b"compiled-css"})
+        gameinfo.enable_addons_path(self.gameinfo)
+        code, output = _run(["--game-path", str(self.game), "verify"])
+        self.assertEqual(1, code, output)
+        self.assertIn("panorama/layout/hud.vxml_c", output)
+
     def test_cfg_dry_run_lists_repo_configs(self) -> None:
         code, output = _run(["--game-path", str(self.game), "cfg", "--dry-run"])
         self.assertEqual(0, code, output)
@@ -189,6 +208,38 @@ class CommandTest(FakeGameCase):
         code, _ = _run(["--game-path", str(self.game), "cfg", "--uninstall"])
         self.assertEqual(0, code)
         self.assertFalse(target.exists())
+
+
+class StageValidationTest(FakeGameCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self._bundle = Path(self._tmp.name) / "incomplete-bundle"
+        self._source_vpk = Path(self._tmp.name) / "incomplete.vpk"
+        self._stage_target = Path(self._tmp.name) / "stage-output"
+        self._old_bundle_dir = install_dmm.BUNDLE_DIR
+        self._old_vpk_source = install_dmm.VPK_SOURCE
+        install_dmm.BUNDLE_DIR = self._bundle
+        install_dmm.VPK_SOURCE = self._source_vpk
+
+        self._source_vpk.write_bytes(
+            vpk.build_vpk({"panorama/styles/bhop_trainer.vcss_c": b"compiled-css"})
+        )
+        bundle_file = dmm_bundle.BundleFile(name="bhop_trainer_dir.vpk", source=self._source_vpk)
+        document = dmm_bundle.build_document(
+            files=[bundle_file], entry_folder="0000_bhop_trainer", title="Bhop Trainer"
+        )
+        dmm_bundle.write_bundle(self._bundle, document, [bundle_file])
+
+    def tearDown(self) -> None:
+        install_dmm.BUNDLE_DIR = self._old_bundle_dir
+        install_dmm.VPK_SOURCE = self._old_vpk_source
+        super().tearDown()
+
+    def test_stage_refuses_incomplete_hud_before_copying_package(self) -> None:
+        code, output = _run(["stage", "--to", str(self._stage_target)])
+        self.assertEqual(2, code, output)
+        self.assertIn("panorama/layout/hud.vxml_c", output)
+        self.assertFalse(self._stage_target.exists())
 
 
 class RestoreGameInfoTest(FakeGameCase):
@@ -286,11 +337,56 @@ class DirectAndUninstallTest(FakeGameCase):
         self.assertTrue(gameinfo.status(self.gameinfo).has_addons_path)
         self.assertIn("Готово", output)
 
+    def test_direct_reinstall_replaces_our_old_slot_and_keeps_backup(self) -> None:
+        code, output = _run(["--game-path", str(self.game), "direct"])
+        self.assertEqual(0, code, output)
+        updated = {
+            "panorama/layout/hud.vxml_c": b"new-compiled-layout",
+            "panorama/styles/bhop_trainer.vcss_c": b"new-compiled-css",
+        }
+        install_dmm.VPK_SOURCE.write_bytes(vpk.build_vpk(updated))
+        code, output = _run(["--game-path", str(self.game), "direct"])
+        self.assertEqual(0, code, output)
+        installed = sorted(self.addons.glob("pak*_dir.vpk"))
+        self.assertEqual([self.addons / "pak01_dir.vpk"], installed)
+        self.assertEqual(vpk.build_vpk(updated), installed[0].read_bytes())
+        self.assertTrue(list(self.addons.glob("pak01_dir.vpk.bhop-backup-*")))
+        self.assertEqual(1, len(install_dmm.find_installed_mods(self.game)))
+
+    def test_direct_refuses_dmm_profile_copy(self) -> None:
+        profile = self.addons / "dmm-profile" / "pak02_dir.vpk"
+        profile.parent.mkdir(parents=True)
+        profile.write_bytes(vpk.build_vpk(MOD_ENTRIES))
+        code, output = _run(["--game-path", str(self.game), "direct"])
+        self.assertEqual(2, code, output)
+        self.assertIn("в профиле/подпапке DMM", output)
+        self.assertFalse((self.addons / "pak01_dir.vpk").exists())
+
+    def test_direct_refuses_while_game_is_running(self) -> None:
+        from unittest import mock
+
+        with mock.patch.object(install_dmm.paths_mod, "is_game_running", return_value=True):
+            code, output = _run(["--game-path", str(self.game), "direct"])
+        self.assertEqual(2, code, output)
+        self.assertIn("закрой Deadlock", output)
+        self.assertFalse((self.addons / "pak01_dir.vpk").exists())
+        self.assertFalse(gameinfo.status(self.gameinfo).has_addons_path)
+
     def test_direct_requires_built_vpk(self) -> None:
         install_dmm.VPK_SOURCE = Path("/nope/missing.vpk")
         code, output = _run(["--game-path", str(self.game), "direct"])
         self.assertEqual(2, code, output)
         self.assertIn("нет собранного VPK", output)
+
+    def test_direct_refuses_vpk_without_compiled_hud_layout(self) -> None:
+        install_dmm.VPK_SOURCE.write_bytes(
+            vpk.build_vpk({"panorama/styles/bhop_trainer.vcss_c": b"compiled-css"})
+        )
+        code, output = _run(["--game-path", str(self.game), "direct"])
+        self.assertEqual(2, code, output)
+        self.assertIn("panorama/layout/hud.vxml_c", output)
+        self.assertEqual([], list(self.addons.glob("*.vpk")))
+        self.assertFalse(gameinfo.status(self.gameinfo).has_addons_path)
 
     def test_uninstall_removes_mod_and_restores_gameinfo(self) -> None:
         _run(["--game-path", str(self.game), "direct"])
