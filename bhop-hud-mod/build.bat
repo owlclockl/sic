@@ -29,6 +29,12 @@ rem               --test      (run the builder's unit tests first)
 rem               -y          (no questions, for CI)
 rem  Unknown options are forwarded to tools\build_mod.py as-is.
 rem
+rem  Logging: everything (this launcher, the Python tools and the compiler
+rem  output) goes to the console AND to logs\build-<date>-<time>.log next to
+rem  this file, with a stable copy at logs\latest.log. Send that file when a
+rem  build fails -- it has the environment, the commands and their full
+rem  output. The log lives outside dist\ on purpose: --clean wipes dist\.
+rem
 rem  NOTE: this file is intentionally pure ASCII (no codepage switching), so it
 rem  looks the same on any Windows locale. The builder it runs prints Russian.
 rem ===========================================================================
@@ -77,6 +83,10 @@ set "ALLOW_UNCOMPILED=0"
 set "DO_CLEAN=0"
 set "DO_TEST=0"
 set "NONINTERACTIVE=0"
+set "LOG_DIR="
+set "LOG_FILE="
+set "NO_LOG=0"
+set "LOG_ARG="
 set "GAME_ARG="
 set "DIST_ARG="
 set "STEAM_PATH="
@@ -101,6 +111,9 @@ if /i "%~1"=="--version" set "ARG_VERSION=%~2" & shift & shift & goto :parse_arg
 if /i "%~1"=="-y" set "NONINTERACTIVE=1" & shift & goto :parse_args
 if /i "%~1"=="--yes" set "NONINTERACTIVE=1" & shift & goto :parse_args
 if /i "%~1"=="--clean" set "DO_CLEAN=1" & shift & goto :parse_args
+if /i "%~1"=="--log-file" set "LOG_FILE=%~2" & shift & shift & goto :parse_args
+if /i "%~1"=="--log-dir" set "LOG_DIR=%~2" & shift & shift & goto :parse_args
+if /i "%~1"=="--no-log-file" set "NO_LOG=1" & shift & goto :parse_args
 if /i "%~1"=="--test" set "DO_TEST=1" & shift & goto :parse_args
 if /i "%~1"=="--allow-uncompiled" set "ALLOW_UNCOMPILED=1" & shift & goto :parse_args
 if /i "%~1"=="/?" goto :usage
@@ -113,6 +126,14 @@ goto :parse_args
 :args_done
 if defined ARG_OUT set "DIST_DIR=%ARG_OUT%"
 if defined ARG_OUT set "DIST_ARG=--dist "%ARG_OUT%""
+
+rem --- log file ---------------------------------------------------------------
+rem One file for everything: this launcher, the Python tools and the compiler.
+rem Same text as the console, so it can be sent as-is when a build fails.
+call :make_log_file
+if defined LOG_FILE set "LOG_ARG=--log-file "%LOG_FILE%""
+if "%NO_LOG%"=="1" set "LOG_ARG=--no-log-file"
+call :log_header
 
 echo.
 echo ============================================================
@@ -158,6 +179,7 @@ goto :fail
 
 :python_found
 echo [i] Python:    %PY_CMD%
+call :logmsg "python: %PY_CMD%"
 
 if "%DO_TEST%"=="1" call :run_tests
 
@@ -170,6 +192,7 @@ goto :game_missing
 :game_found
 if defined GAME_DIR set "GAME_ARG=--game-path "%GAME_DIR%""
 if defined GAME_DIR echo [i] Deadlock:  %GAME_DIR%
+if defined GAME_DIR call :logmsg "deadlock: %GAME_DIR%"
 
 rem --- CSDK ------------------------------------------------------------------
 call :resolve_csdk
@@ -197,6 +220,7 @@ echo.
 set "ANS="
 set /p "ANS=    Choice [1]: "
 if not defined ANS set "ANS=1"
+call :logmsg "menu csdk: choice %ANS%"
 if "%ANS%"=="1" goto :csdk_auto_try
 if "%ANS%"=="2" goto :csdk_manual
 if "%ANS%"=="3" goto :csdk_open_url
@@ -221,6 +245,7 @@ echo     [0] Quit
 echo.
 set "ANS="
 set /p "ANS=    Choice: "
+call :logmsg "menu csdk manual: choice %ANS%"
 if "%ANS%"=="1" goto :csdk_manual
 if "%ANS%"=="2" goto :csdk_open_url
 if "%ANS%"=="3" goto :csdk_allow_uncompiled
@@ -245,6 +270,7 @@ if defined ARG_CSDK_DIR set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% --install-dir "%A
 if "%FORCE_CSDK_INSTALL%"=="1" set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% --force-install"
 if defined ARG_CSDK_URL set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% --url "%ARG_CSDK_URL%""
 if "%DO_CSDK_REDOWNLOAD%"=="1" set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% --redownload"
+if defined LOG_ARG set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% %LOG_ARG%"
 if exist "%CSDK_ROOT_FILE%" del /q "%CSDK_ROOT_FILE%" >nul 2>nul
 %PY_CMD% "%SETUP_PY%" %CSDK_SETUP_ARGS%
 set "_CSDK_TMP="
@@ -294,6 +320,7 @@ goto :fail
 
 :csdk_found
 if defined CSDK_DIR echo [i] CSDK:      %CSDK_DIR%
+if defined CSDK_DIR call :logmsg "csdk: %CSDK_DIR%"
 if /i not "%CSDK_DIR:OneDrive=%"=="%CSDK_DIR%" echo [!] Warning: CSDK sits in OneDrive - the compiler often breaks there.
 
 rem --- build -----------------------------------------------------------------
@@ -315,14 +342,17 @@ if "%NO_CSDK_DOWNLOAD%"=="1" set "BUILD_ARGS=%BUILD_ARGS% --no-auto-csdk"
 if defined ARG_CSDK_DIR set "BUILD_ARGS=%BUILD_ARGS% --csdk-install-dir "%ARG_CSDK_DIR%""
 if defined ARG_CSDK_URL set "BUILD_ARGS=%BUILD_ARGS% --csdk-url "%ARG_CSDK_URL%""
 if "%DO_CSDK_REDOWNLOAD%"=="1" set "BUILD_ARGS=%BUILD_ARGS% --csdk-redownload"
-if "%DO_CLEAN%"=="1" set "BUILD_ARGS=%BUILD_ARGS% --clean"
+rem --clean is handled above by :do_clean; passing it to the builder as well
+rem would delete the open log file (the log lives next to the mod)
 if defined ARG_STEPS set "BUILD_ARGS=%BUILD_ARGS% --steps "%ARG_STEPS%""
 if defined ARG_OUT set "BUILD_ARGS=%BUILD_ARGS% --out "%ARG_OUT%""
 if defined ARG_VERSION set "BUILD_ARGS=%BUILD_ARGS% --version "%ARG_VERSION%""
 if "%ALLOW_UNCOMPILED%"=="1" set "BUILD_ARGS=%BUILD_ARGS% --allow-uncompiled"
+if defined LOG_ARG set "BUILD_ARGS=%BUILD_ARGS% %LOG_ARG%"
 
 %PY_CMD% "%BUILD_PY%"%BUILD_ARGS%%ARG_EXTRA%
 set "BUILD_RC=%ERRORLEVEL%"
+call :logmsg "build_mod.py exit code: %BUILD_RC%"
 
 if "%BUILD_RC%"=="0" goto :build_ok
 if "%BUILD_RC%"=="3" goto :build_needs_compile
@@ -331,21 +361,57 @@ if "%BUILD_RC%"=="130" goto :build_cancel
 :build_failed
 if "%BUILD_RETRIED%"=="1" goto :build_failed_final
 findstr /i /c:"Unable to load module" /c:"error 126" "%DIST_DIR%\BUILD_REPORT.md" >nul 2>nul
-if not errorlevel 1 goto :repair_csdk
+if not errorlevel 1 goto :module_error_help
 findstr /s /i /c:"Unable to load module" /c:"error 126" "%MOD_DIR%\build\compile_logs\*.log" >nul 2>nul
 if errorlevel 1 goto :build_failed_final
 
-:repair_csdk
+:module_error_help
+rem Nothing is moved or deleted here. The previous build did exactly that and left
+rem the machine without a usable CSDK as soon as the fresh download failed.
 echo.
-echo [!] resourcecompiler hit Windows DLL load error 126 (modtools).
-echo     I will preserve the current CSDK, download a fresh copy, and retry once.
+echo [!] resourcecompiler could not load its own module (modtools, error 126).
+echo     That is a failure of the tools module, not of the mod itself. Typical
+echo     reasons: -game pointed at the installed game (no tools modules there),
+echo     the CSDK tree has no base mod game/citadel/gameinfo.gi, the SDK archive is
+echo     incomplete, or Microsoft Visual C++ Redistributable (x64) is missing.
+echo.
+echo     Nothing was deleted or renamed: your CSDK is untouched. The full text of
+echo     the attempt is in %DIST_DIR%\BUILD_REPORT.md and %MOD_DIR%\build\compile_logs.
+echo     The same text, plus the environment and every command, is in the log:
+if defined LOG_FILE echo       %LOG_FILE%
+echo.
+if "%NONINTERACTIVE%"=="1" goto :module_error_retry
+echo     [1] Retry the build now (recommended). The builder keeps -game inside the
+echo         CSDK and puts game/citadel/gameinfo.gi there when it is missing, so the
+echo         tools module never has to be loaded from the game install.
+echo     [2] Download a fresh CSDK (the old one stays as *.broken-* next to it)
+echo     [3] Build sources only (--allow-uncompiled: will not work in game)
+echo     [0] Quit
+echo.
+set "ANS="
+set /p "ANS=    Choice [1]: "
+if not defined ANS set "ANS=1"
+call :logmsg "menu error 126: choice %ANS%"
+if "%ANS%"=="1" goto :module_error_retry
+if "%ANS%"=="2" goto :csdk_redownload
+if "%ANS%"=="3" goto :csdk_allow_uncompiled
+if "%ANS%"=="0" goto :build_failed_final
+goto :module_error_help
+
+:module_error_retry
+set "BUILD_RETRIED=1"
+echo.
+echo [i] Retrying the build...
+goto :do_build
+
+:csdk_redownload
 if not defined CSDK_DIR goto :build_failed_final
 set "BUILD_RETRIED=1"
 set "BROKEN_CSDK=%CSDK_DIR%"
 :choose_csdk_backup
 set "CSDK_BACKUP=%BROKEN_CSDK%.broken-%RANDOM%"
 if exist "%CSDK_BACKUP%" goto :choose_csdk_backup
-echo     Moving broken SDK to: %CSDK_BACKUP%
+echo     Moving the old CSDK to: %CSDK_BACKUP%
 move "%BROKEN_CSDK%" "%CSDK_BACKUP%" >nul
 if errorlevel 1 goto :repair_move_failed
 set "ARG_CSDK_DIR=%BROKEN_CSDK%"
@@ -364,13 +430,22 @@ echo [!] Could not move the old CSDK aside; leaving it untouched.
 goto :build_failed_final
 
 :repair_download_failed
-echo [!] Automatic CSDK repair failed. The old SDK is preserved at %CSDK_BACKUP%.
+echo [!] Automatic CSDK download failed, so the old SDK stays at
+echo     %CSDK_BACKUP%
+echo     (put it back or pass it again with --csdk).
+echo.
+echo     If Google Drive refuses to serve the archive (daily download limit),
+echo     download Reduced CSDK 12 by hand from %CSDK_URL% and either unpack it and
+echo     pass --csdk "C:\Reduced_CSDK_12", or just drop the .zip into the cache:
+echo       %LOCALAPPDATA%\DeadlockModding\csdk-cache
+echo     The builder takes an archive from there without touching the network.
 goto :build_failed_final
 
 :build_failed_final
 echo.
 echo [X] Build failed (exit code %BUILD_RC%).
 echo     Details are in %DIST_DIR%\BUILD_REPORT.md
+if defined LOG_FILE echo     Full log (send this file): %LOG_FILE%
 goto :fail
 
 :build_cancel
@@ -387,6 +462,7 @@ if "%NONINTERACTIVE%"=="1" goto :fail
 echo.
 set "ANS="
 set /p "ANS=    Download/install CSDK and retry? [Y/n/s(ources only)]: "
+call :logmsg "menu needs compiler: answer [%ANS%]"
 if /i "%ANS%"=="s" set "ALLOW_UNCOMPILED=1"
 if /i "%ANS%"=="s" goto :do_build
 if /i "%ANS%"=="n" goto :fail
@@ -421,15 +497,18 @@ echo     [2] Install the mod into the game directly, no manager
 echo     [3] Copy the trainer .cfg files into game\citadel\cfg
 echo     [4] Verify the installation
 echo     [5] Open the build report
+echo     [6] Open the build log (send this file when something is wrong)
 echo     [0] Quit
 echo.
 set "ANS="
 set /p "ANS=    Choice: "
+call :logmsg "menu after build: choice %ANS%"
 if "%ANS%"=="1" goto :act_stage
 if "%ANS%"=="2" goto :act_direct
 if "%ANS%"=="3" goto :act_cfg
 if "%ANS%"=="4" goto :act_verify
 if "%ANS%"=="5" goto :act_report
+if "%ANS%"=="6" goto :act_log
 if "%ANS%"=="0" goto :done
 echo     Did not get that, try again.
 echo.
@@ -437,31 +516,38 @@ goto :menu
 
 :act_stage
 echo.
-%PY_CMD% "%INSTALL_PY%" stage --open %GAME_ARG% %DIST_ARG%
+%PY_CMD% "%INSTALL_PY%" stage --open %GAME_ARG% %DIST_ARG% %LOG_ARG%
 echo.
 goto :menu
 
 :act_direct
 echo.
-%PY_CMD% "%INSTALL_PY%" direct %GAME_ARG% %DIST_ARG%
+%PY_CMD% "%INSTALL_PY%" direct %GAME_ARG% %DIST_ARG% %LOG_ARG%
 echo.
 goto :menu
 
 :act_cfg
 echo.
-%PY_CMD% "%INSTALL_PY%" cfg %GAME_ARG%
+%PY_CMD% "%INSTALL_PY%" cfg %GAME_ARG% %LOG_ARG%
 echo.
 goto :menu
 
 :act_verify
 echo.
-%PY_CMD% "%INSTALL_PY%" verify %GAME_ARG% %DIST_ARG%
+%PY_CMD% "%INSTALL_PY%" verify %GAME_ARG% %DIST_ARG% %LOG_ARG%
 echo.
 goto :menu
 
 :act_report
 if exist "%DIST_DIR%\BUILD_REPORT.md" start "" notepad "%DIST_DIR%\BUILD_REPORT.md"
 if not exist "%DIST_DIR%\BUILD_REPORT.md" echo     No report at: %DIST_DIR%\BUILD_REPORT.md
+echo.
+goto :menu
+
+:act_log
+echo.
+if defined LOG_FILE start "" notepad "%LOG_FILE%"
+if not defined LOG_FILE echo     No log file was written: it is switched off by --no-log-file.
 echo.
 goto :menu
 
@@ -532,6 +618,7 @@ echo     [0] Quit
 echo.
 set "ANS="
 set /p "ANS=    Choice: "
+call :logmsg "menu python install: choice %ANS%"
 if "%ANS%"=="1" goto :install_python
 if "%ANS%"=="2" goto :open_python_url
 if "%ANS%"=="0" goto :fail
@@ -688,6 +775,7 @@ echo     [0] Quit
 echo.
 set "ANS="
 set /p "ANS=    Choice: "
+call :logmsg "menu game missing: choice %ANS%"
 if "%ANS%"=="1" goto :game_manual_dir
 if "%ANS%"=="2" goto :game_manual_hud
 if "%ANS%"=="0" goto :fail
@@ -835,11 +923,22 @@ echo     --out DIR            where to put artifacts (dist by default)
 echo     --version X.Y.Z      mod version
 echo     --compiler-game PATH folder with gameinfo.gi for -game; only some
 echo                          CSDK builds need it (by default -game is not passed)
+echo     --no-csdk-gameinfo-repair  never copy game/citadel/gameinfo.gi from the
+echo                          game install into the CSDK tree (the builder does
+echo                          that itself when the CSDK has no base mod)
 echo     --allow-uncompiled   build without the compiler (will not work in game)
 echo     --clean              delete build\ and dist\ first
 echo     --test               run the builder's unit tests first
 echo     -y                   ask nothing: install Python and CSDK itself (CI)
+echo     --trace              maximum detail (file hashes, directory listings)
+echo     --quiet              shorter output, only the important lines
+echo     --log-file FILE      write the log there (default: logs\build-*.log,
+echo                          next to this bat, so --clean cannot delete it)
+echo     --log-dir DIR        where to put the log when --log-file is not given
+echo     --no-log-file        do not write a log file (console only)
 echo.
+echo   A failed build is best reported with the log file:
+echo     logs\build-YYYYMMDD-HHMMSS.log   (same as logs\latest.log)
 echo   Example:
 echo     build.bat --game-path "D:\Steam\steamapps\common\Deadlock" --csdk "C:\Deadlock SDK"
 echo     build.bat -y                        (everything unattended, from scratch)
@@ -852,7 +951,8 @@ echo.
 echo [X] Finished with errors. If the reason is unclear, look at
 echo     %DIST_DIR%\BUILD_REPORT.md
 echo     and at README.md in the mod folder.
-echo.
+call :send_log_hint
+call :finish_log 1
 if "%NONINTERACTIVE%"=="1" endlocal & exit /b 1
 endlocal
 pause
@@ -860,7 +960,74 @@ exit /b 1
 
 :done
 echo.
+call :send_log_hint
+call :finish_log 0
 if "%NONINTERACTIVE%"=="1" endlocal & exit /b 0
 endlocal
 pause
 exit /b 0
+
+
+rem ==========================================================================
+rem  Log file
+rem ==========================================================================
+
+rem --- pick the log file name (no Python needed for that) --------------------
+:make_log_file
+if "%NO_LOG%"=="1" goto :eof
+if defined LOG_FILE if not defined LOG_DIR for %%i in ("%LOG_FILE%") do set "_ld=%%~dpi"
+if defined LOG_FILE if not defined LOG_DIR for %%i in ("%_ld%.") do set "LOG_DIR=%%~fi"
+if not defined LOG_DIR set "LOG_DIR=%MOD_DIR%\logs"
+set "_stamp="
+rem PowerShell gives an ISO stamp in any locale; without it a random name is fine
+for /f "usebackq delims=" %%i in (`powershell -NoProfile -Command "Get-Date -Format yyyyMMdd-HHmmss" 2^>nul`) do set "_stamp=%%i"
+if not defined _stamp set "_stamp=run-%RANDOM%%RANDOM%"
+if not defined LOG_FILE set "LOG_FILE=%LOG_DIR%\build-%_stamp%.log"
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>nul
+call :logmsg "---- build.bat started ----"
+goto :eof
+
+rem --- first lines of the log: what and where this launcher is ---------------
+:log_header
+call :logmsg "date: %DATE% %TIME% (system locale)"
+call :logmsg "cwd: %CD%"
+call :logmsg "mod dir: %MOD_DIR%"
+call :logmsg "artifacts: %DIST_DIR%"
+call :logmsg "os: %OS% %PROCESSOR_ARCHITECTURE%"
+call :logmsg "user: %USERNAME%"
+call :logmsg "python is started below: it logs the exact argv"
+call :logmsg "log file: %LOG_FILE%"
+goto :eof
+
+rem --- append one ASCII line to the log --------------------------------------
+rem cmd.exe writes in the OEM codepage, so keep these lines ASCII-only: then
+rem they are valid UTF-8 too and the file stays readable in any editor. Lines
+rem with non-ASCII characters (a Cyrillic user name) are fixed at the very end
+rem by tools\trace_log.py --repair, which knows the console codepage.
+:logmsg
+if not defined LOG_FILE goto :eof
+>>"%LOG_FILE%" echo [launcher] %~1
+goto :eof
+
+rem --- tell the user which file to send --------------------------------------
+:send_log_hint
+if not defined LOG_FILE goto :eof
+echo.
+echo   ============================================================
+echo   Full log of this run (send this file if you need help):
+echo     %LOG_FILE%
+echo   Stable copy: %LOG_DIR%\latest.log
+echo   The console text above is the same log: right-click the window,
+echo   Select all, then copy it into the message as a fallback.
+echo   Nothing secret is in it: paths, versions and tool output only.
+echo   ============================================================
+goto :eof
+
+rem --- finish the log: footer, latest.log copy, encoding repair --------------
+:finish_log
+if not defined LOG_FILE goto :eof
+call :logmsg "---- build.bat finished (exit code %~1) ----"
+copy /y "%LOG_FILE%" "%LOG_DIR%\latest.log" >nul 2>nul
+if not defined PY_CMD goto :eof
+%PY_CMD% "%TOOLS_DIR%\trace_log.py" --repair "%LOG_FILE%" --quiet >nul 2>nul
+goto :eof

@@ -15,9 +15,15 @@ Deadlock Mod Manager (``MODDED_SEARCH_PATHS``) — см. файл в его ис
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import trace_log  # noqa: E402
 
 MARKER = "// bhop-trainer: Game citadel/addons"
 #: Строка пути; отступ берётся у соседней ``Game citadel``, чтобы правка выглядела
@@ -128,7 +134,23 @@ def _backup(path: Path) -> Path:
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = path.with_name(f"{path.name}.bhop-bak-{stamp}")
     backup.write_bytes(path.read_bytes())
+    trace_log.detail(
+        f"резервная копия gameinfo.gi: {backup.name} "
+        f"({trace_log.human_bytes(backup.stat().st_size)})"
+    )
     return backup
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _describe_edit(path: Path, text: str, *, what: str) -> None:
+    """Одна строка о том, что стало с gameinfo.gi после правки."""
+    trace_log.detail(
+        f"{what}: {path} — {len(text)} символов, {text.count(chr(10)) + 1} строк, "
+        f"sha256 {_sha256(text)[:16]}…"
+    )
 
 
 def _insertion(indent: str, ending: str) -> str:
@@ -162,8 +184,10 @@ def enable_addons_path(gameinfo_path: Path, *, dry_run: bool = False) -> PatchOu
         raise GameInfoError(f"gameinfo.gi не найден: {path}")
     text = path.read_text(encoding="utf-8", errors="replace")
     ending = _line_ending(text)
+    trace_log.detail(f"правлю {path} (окончания строк: {'CRLF' if ending == chr(13) + chr(10) else 'LF'})")
 
     if ADDONS_RE.search(text):
+        trace_log.decision("строка citadel/addons", "уже есть", "правка не нужна — файл не меняется")
         return PatchOutcome(
             changed=False, path=path, dry_run=dry_run,
             message="строка citadel/addons уже есть — правка не нужна",
@@ -185,16 +209,22 @@ def enable_addons_path(gameinfo_path: Path, *, dry_run: bool = False) -> PatchOu
     indent = line_prefix[: len(line_prefix) - len(line_prefix.lstrip(" \t"))]
     insertion = _insertion(indent, ending)
     patched = text[:line_start] + insertion + text[line_start:]
+    trace_log.detail(
+        f"вставляю «{ADDONS_LINE.strip()}» перед строкой "
+        f"{text.count(chr(10), 0, anchor.start()) + 1} (отступ «{indent}»)"
+    )
 
     after_delta = brace_balance(patched)
     if after_delta != 0:
         raise GameInfoError(f"после правки нарушился баланс скобок ({after_delta:+d}) — запись отменена")
 
     if dry_run:
+        trace_log.detail("пробный запуск: правка не записана")
         return PatchOutcome(changed=True, path=path, dry_run=True, message="пробный запуск: правка не записана")
 
     backup = _backup(path)
     path.write_text(patched, encoding="utf-8", newline="")
+    _describe_edit(path, patched, what="gameinfo.gi обновлён")
     return PatchOutcome(
         changed=True, path=path, backup=backup,
         message=f"добавлена строка citadel/addons; копия оригинала: {backup.name}",
@@ -212,10 +242,12 @@ def disable_addons_path(gameinfo_path: Path, *, dry_run: bool = False, from_back
         if not backups:
             raise GameInfoError("резервных копий нет — восстанавливать нечего")
         backup = backups[-1]
+        trace_log.detail(f"восстанавливаю gameinfo.gi из копии {backup.name}")
         if dry_run:
             return PatchOutcome(changed=True, path=path, backup=backup, dry_run=True,
                                 message=f"пробный запуск: восстановил бы {backup.name}")
         path.write_bytes(backup.read_bytes())
+        trace_log.detail(f"gameinfo.gi восстановлен: {path}")
         return PatchOutcome(changed=True, path=path, backup=backup,
                             message=f"gameinfo.gi восстановлен из {backup.name}")
 
@@ -224,6 +256,7 @@ def disable_addons_path(gameinfo_path: Path, *, dry_run: bool = False, from_back
 
     pattern = _removal_pattern(ending)
     if not pattern.search(text):
+        trace_log.decision("правки в gameinfo.gi", "нет", "строки citadel/addons и маркера нет — файл не меняется")
         return PatchOutcome(changed=False, path=path, dry_run=dry_run, message="наших правок в файле нет")
     patched = pattern.sub("", text, count=1)
     if brace_balance(patched) != 0:
@@ -233,5 +266,6 @@ def disable_addons_path(gameinfo_path: Path, *, dry_run: bool = False, from_back
 
     backup = _backup(path)
     path.write_text(patched, encoding="utf-8", newline="")
+    _describe_edit(path, patched, what="gameinfo.gi без правок мода")
     return PatchOutcome(changed=True, path=path, backup=backup,
                         message="строка citadel/addons удалена (это затронет и другие моды)")

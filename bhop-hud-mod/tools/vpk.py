@@ -26,10 +26,15 @@ from __future__ import annotations
 import hashlib
 import mmap
 import struct
+import sys
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, Mapping, Sequence
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import trace_log  # noqa: E402
 
 SIGNATURE = 0x55AA1234
 VERSION = 2
@@ -157,6 +162,12 @@ def build_vpk(entries: Mapping[str, bytes]) -> bytes:
         0,  # other md5 section
         0,  # signature section
     )
+    trace_log.detail(
+        f"VPK v{VERSION}: записей {len(entries)}, дерево {len(directory_tree)} Б, "
+        f"данные {len(data)} Б, всего {len(header) + len(directory_tree) + len(data)} Б"
+    )
+    for virtual_path in sorted(entries, key=normalize_virtual_path):
+        trace_log.trace(f"  запись {normalize_virtual_path(virtual_path)}: {len(entries[virtual_path])} Б")
     return bytes(header + directory_tree + bytes(data))
 
 
@@ -433,6 +444,7 @@ def verify_vpk(vpk_bytes: bytes, expected: Mapping[str, bytes]) -> list[str]:
 
     expected_paths = {normalize_virtual_path(name) for name in expected}
     actual_paths = set(archive.list_entries())
+    trace_log.detail(f"проверяю VPK: ожидалось {len(expected_paths)} записей, в архиве {len(actual_paths)}")
     for missing in sorted(expected_paths - actual_paths):
         problems.append(f"в VPK нет записи {missing}")
     for extra in sorted(actual_paths - expected_paths):
@@ -457,6 +469,12 @@ def verify_vpk(vpk_bytes: bytes, expected: Mapping[str, bytes]) -> list[str]:
             continue
         if actual != payload:
             problems.append(f"{canonical}: содержимое отличается от исходного файла")
+    if problems:
+        trace_log.warn(f"проверка VPK нашла проблемы: {len(problems)}")
+        for problem in problems:
+            trace_log.detail(f"    {problem}")
+    else:
+        trace_log.detail("VPK прошёл проверку: состав, длины, CRC32 и содержимое совпадают")
     return problems
 
 

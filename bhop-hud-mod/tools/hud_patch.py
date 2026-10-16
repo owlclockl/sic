@@ -13,9 +13,14 @@
 from __future__ import annotations
 
 import re
+import sys
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass, field
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import trace_log  # noqa: E402
 
 MARK_BEGIN = "bhop-trainer:begin"
 MARK_END = "bhop-trainer:end"
@@ -118,6 +123,8 @@ def patch_hud_xml(
 
     if MARK_BEGIN in normalized:
         result.notes.append("панель уже вставлена (маркер bhop-trainer:begin на месте)")
+        trace_log.decision("панель мода в hud.xml", "уже вставлена",
+                           "маркер bhop-trainer:begin на месте — повторный патч ничего не меняет")
     else:
         indent = _detect_anchor_indent(normalized, "</CitadelHud>")
         snippet_lines = [line for line in snippet.split("\n")]
@@ -130,9 +137,14 @@ def patch_hud_xml(
         line_start = normalized.rfind("\n", 0, anchor_index) + 1
         normalized = normalized[:line_start] + block + normalized[line_start:]
         result.added_panel = True
+        trace_log.detail(
+            f"панель вставлена перед </CitadelHud>: {len(block_lines)} строк, "
+            f"{len(block)} символов, отступ «{indent}»"
+        )
 
     if MARK_STYLES in normalized:
         result.notes.append("include стилей уже добавлен (маркер bhop-trainer:styles на месте)")
+        trace_log.decision("include стилей в hud.xml", "уже на месте", "маркер bhop-trainer:styles")
     else:
         anchor_index = normalized.rfind("</styles>")
         if anchor_index < 0:
@@ -145,6 +157,7 @@ def patch_hud_xml(
         line_start = normalized.rfind("\n", 0, anchor_index) + 1
         normalized = normalized[:line_start] + include_block + normalized[line_start:]
         result.added_styles = True
+        trace_log.detail(f"подключены стили {style_src} перед </styles>")
 
     problems = validate_hud_xml(normalized)
     if problems:
@@ -154,6 +167,7 @@ def patch_hud_xml(
         error = _xml_is_well_formed(normalized)
         if error:
             raise HudPatchError(f"после патча hud.xml не парсится как XML: {error}")
+        trace_log.detail("пропатченный hud.xml разбирается как XML: ошибок нет")
 
     result.text = normalized.replace("\n", ending) if ending == "\r\n" else normalized
     if not result.changed:

@@ -29,6 +29,7 @@ from __future__ import annotations
 import base64
 import datetime as _dt
 import json
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,8 +37,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Sequence
 
-import hud_patch
-import vpk
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import hud_patch  # noqa: E402
+import trace_log  # noqa: E402
+import vpk  # noqa: E402
 
 #: Где лежит layout внутри пака/дерева.
 HUD_XML_VIRTUAL_PATH = "panorama/layout/hud.xml"
@@ -287,11 +290,17 @@ def decode_download(url: str, raw: bytes) -> bytes:
 def _first_working(urls: Sequence[str], fetch: Callable[[str], bytes]) -> tuple[bytes, str]:
     """Скачать первый удачный URL; вернуть (данные, URL)."""
     errors: list[str] = []
+    trace_log.detail(f"пробую ссылки на ванильный hud.xml: {len(urls)} шт.")
     for url in urls:
         try:
-            return decode_download(url, fetch(url)), url
+            raw = fetch(url)
+            trace_log.detail(f"  {url}: получено {len(raw)} Б")
+            data = decode_download(url, raw)
+            trace_log.detail(f"  {url}: распаковано до {len(data)} Б, sha256 {trace_log.sha256_of(data)[:16]}…")
+            return data, url
         except (urllib.error.URLError, OSError, HudSourceError, ValueError) as error:
             errors.append(f"{url}: {error}")
+            trace_log.detail(f"  {url}: не вышло ({type(error).__name__}: {error})")
     raise HudSourceError("; ".join(errors))
 
 
@@ -314,7 +323,9 @@ def _read_cache(cache_dir: Path | None) -> HudSource | None:
         return None
     problems: list[str] = []
     if not _usable(data, problems, str(hud)):
+        trace_log.detail(f"кэш ванильного hud.xml не подошёл: {hud} ({'; '.join(problems)})")
         return None
+    trace_log.detail(f"кэш ванильного hud.xml: {trace_log.describe(hud)}")
     meta: dict[str, object] = {}
     meta_path = cache_dir / CACHE_META_NAME
     if meta_path.is_file():
@@ -355,6 +366,8 @@ def _write_cache(cache_dir: Path | None, data: bytes, url: str, mirror_build: st
     (cache_dir / CACHE_META_NAME).write_text(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    trace_log.path_event("ванильный hud.xml положен в кэш", target, size=len(data), sha256=meta["sha256"])
+    trace_log.trace(f"  метаданные кэша: {meta}")
     return target
 
 
@@ -369,16 +382,20 @@ def _scan_paks(roots: Sequence[Path], virtual_path: str) -> tuple[bytes | None, 
     saw_pak = False
     for root in roots:
         candidates = vpk.find_pak_candidates(Path(root))
+        trace_log.detail(f"паки в {root}: {[pak.name for pak in candidates] or 'нет'}")
         for pak in candidates:
             saw_pak = True
             try:
                 archive = vpk.open_vpk(pak)
             except (vpk.VpkError, OSError) as error:
                 problems.append(f"{pak.name}: не удалось прочитать ({error})")
+                trace_log.detail(f"  {pak.name}: не прочитался ({error})")
                 continue
             try:
                 if not archive.contains(virtual_path):
+                    trace_log.trace(f"  {pak.name}: {virtual_path} нет")
                     continue
+                trace_log.detail(f"  {pak.name}: {virtual_path} найден")
                 entry = archive.find(virtual_path)
                 assert entry is not None
                 try:

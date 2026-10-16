@@ -24,10 +24,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import trace_log  # noqa: E402
 
 from vpk import sha256_of_file
 
@@ -149,6 +154,9 @@ def build_document(
 
 def write_bundle(bundle_dir: Path, document: Mapping[str, Any], files: Sequence[BundleFile]) -> Path:
     """Записать каталог пакета: манифест + ``files/<папка>/<vpk>``."""
+    trace_log.detail(
+        f"пишу пакет DMM: {len(document.get('mods', []))} мод(ов), {len(files)} файл(ов) -> {bundle_dir}"
+    )
     bundle_dir = Path(bundle_dir)
     if bundle_dir.exists():
         for child in sorted(bundle_dir.rglob("*"), reverse=True):
@@ -170,6 +178,7 @@ def write_bundle(bundle_dir: Path, document: Mapping[str, Any], files: Sequence[
 
     manifest = bundle_dir / MANIFEST_FILENAME
     manifest.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    trace_log.detail(f"манифест пакета: {manifest} ({trace_log.human_bytes(manifest.stat().st_size)})")
     return manifest
 
 
@@ -184,6 +193,7 @@ def write_zip(zip_path: Path, bundle_dir: Path, notes: str = "") -> Path:
                 archive.write(path, path.relative_to(bundle_dir).as_posix())
         if notes:
             archive.writestr("README-INSTALL.txt", notes)
+    trace_log.detail(f"zip для DMM: {zip_path} ({trace_log.human_bytes(zip_path.stat().st_size)})")
     return zip_path
 
 

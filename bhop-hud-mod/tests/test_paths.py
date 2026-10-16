@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -78,6 +79,40 @@ class CompilerLayoutTest(unittest.TestCase):
                 compiler = self._write(str(root / relative), "resourcecompiler.exe")
                 (root / "content" / "citadel_addons").mkdir(parents=True)
                 self.assertEqual(compiler, paths.csdk_compiler(root))
+
+    def test_layout_describes_what_is_inside(self) -> None:
+        """``csdk_layout`` — то, по чему сборщик решает, нужен ли базовый мод.
+
+        Именно отсутствие ``game/citadel/gameinfo.gi`` заставляло сборщик уходить
+        на ``-game`` с деревом установленной игры и получать ``error 126``.
+        """
+        flat = self.tmp / "flat"
+        self._write(str(flat), "bin", "win64", "resourcecompiler.exe")
+        (flat / "content" / "citadel_addons").mkdir(parents=True)
+        layout = paths.csdk_layout(flat)
+        self.assertEqual("flat", layout.layout)
+        self.assertFalse(layout.has_gameinfo)
+        self.assertFalse(layout.has_modules)
+        self.assertIn("gameinfo.gi: нет", layout.describe())
+
+        historic = self.tmp / "historic"
+        self._write(str(historic), "game", "bin_cs2", "win64", "resourcecompiler.exe")
+        self._write(str(historic), "game", "bin_cs2", "win64", "modtools.dll")
+        (historic / "game" / "citadel").mkdir(parents=True)
+        (historic / "game" / "citadel" / "gameinfo.gi").write_text("// base mod", encoding="utf-8")
+        layout = paths.csdk_layout(historic)
+        self.assertEqual("game", layout.layout)
+        self.assertTrue(layout.has_gameinfo)
+        self.assertTrue(layout.has_modules)
+        self.assertEqual(historic / "game" / "citadel" / "gameinfo.gi", layout.gameinfo)
+        self.assertIn("gameinfo.gi: есть", layout.describe())
+        self.assertIn("модули инструментов: есть", layout.describe())
+
+    def test_missing_vc_runtime_is_only_checked_on_windows(self) -> None:
+        """На Linux проверять ``System32`` нечего — список обязан быть пустым."""
+        if sys.platform.startswith("win"):
+            self.skipTest("на Windows проверка зависит от установленных DLL")
+        self.assertEqual([], paths.missing_vc_runtime_dlls())
 
     def test_extensionless_compiler_is_found(self) -> None:
         """На Linux/Proton компилятор может лежать без ``.exe``."""
