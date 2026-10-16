@@ -339,8 +339,8 @@ goto :fail
 :build_needs_compile
 echo.
 echo [!] The build stopped at the compile step (exit code 3).
-echo     Check that CSDK is unpacked and that it contains
-echo     game\bin_cs2\win64\resourcecompiler.exe
+echo     Check that CSDK is unpacked and contains resourcecompiler.exe
+echo     (game\bin_* or bin_* inside the CSDK root).
 if "%NONINTERACTIVE%"=="1" goto :fail
 echo.
 set "ANS="
@@ -719,7 +719,7 @@ for %%D in (C D E F G H I J K) do call :scan_csdk_drive %%D
 goto :eof
 
 :check_csdk
-rem %~1 - candidate: CSDK root (contains game\bin_cs2\win64\resourcecompiler.exe)
+rem %~1 - candidate: CSDK root (has resourcecompiler.exe under game\bin_* or bin_*)
 set "_c=%~1"
 if not defined _c goto :eof
 if defined CSDK_DIR goto :eof
@@ -732,9 +732,19 @@ if exist "%_c%\game\bin\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%"
 if defined CSDK_DIR goto :eof
 if exist "%_c%\bin\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%"
 if defined CSDK_DIR goto :eof
+if exist "%_c%\game\bin_tools\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%"
+if defined CSDK_DIR goto :eof
+if exist "%_c%\game\bin_server\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%"
+if defined CSDK_DIR goto :eof
+if exist "%_c%\bin_tools\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%"
+if defined CSDK_DIR goto :eof
+if exist "%_c%\bin_server\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%"
+if defined CSDK_DIR goto :eof
 if exist "%_c%\Reduced_CSDK_12\game\bin_cs2\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%\Reduced_CSDK_12"
 if defined CSDK_DIR goto :eof
 if exist "%_c%\Reduced_CSDK_12\game\bin\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%\Reduced_CSDK_12"
+if defined CSDK_DIR goto :eof
+if exist "%_c%\Reduced_CSDK_12\bin\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%\Reduced_CSDK_12"
 goto :eof
 
 :scan_csdk_drive
@@ -781,6 +791,8 @@ echo     --refresh-hud-xml    ignore the cached hud.xml (after a game patch)
 echo     --steps LIST         prepare,compile,pack,dmm,report (all by default)
 echo     --out DIR            where to put artifacts (dist by default)
 echo     --version X.Y.Z      mod version
+echo     --compiler-game PATH folder with gameinfo.gi for -game; only some
+echo                          CSDK builds need it (by default -game is not passed)
 echo     --allow-uncompiled   build without the compiler (will not work in game)
 echo     --clean              delete build\ and dist\ first
 echo     --test               run the builder's unit tests first
