@@ -1,32 +1,34 @@
 @echo off
 rem ===========================================================================
-rem  Deadlock :: Bhop Trainer HUD  --  автоматическая сборка мода (Windows)
+rem  Deadlock :: Bhop Trainer HUD  --  one-click mod builder for Windows
 rem
-rem  Запускается двойным кликом и делает всё само:
-rem    * находит Python 3.9+ (если его нет - предлагает поставить через winget),
-rem    * находит установленный Deadlock (реестр Steam + libraryfolders.vdf),
-rem    * находит CSDK 12 c resourcecompiler.exe,
-rem    * собирает VPK и пакет для Deadlock Mod Manager,
-rem    * предлагает поставить мод в игру (через DMM или напрямую).
+rem  Double-click it and it does everything by itself:
+rem    * finds Python 3.9+ (offers to install it via winget when missing),
+rem    * finds the installed Deadlock (Steam registry + libraryfolders.vdf),
+rem    * finds CSDK 12 with resourcecompiler.exe,
+rem    * builds the VPK and the Deadlock Mod Manager package,
+rem    * offers to stage / install / verify the mod.
 rem
-rem  Ключи (все необязательны):
+rem  Options (all optional):
 rem    build.bat --game-path "D:\Steam\steamapps\common\Deadlock"
 rem               --csdk "C:\Deadlock SDK"
-rem               --hud-xml "C:\hud.xml"      (если игры нет, а ванильный hud.xml есть)
+rem               --hud-xml "C:\hud.xml"   (vanilla hud.xml when the game is absent)
 rem               --version 1.2.0
 rem               --steps prepare,compile,pack,dmm,report
 rem               --out "D:\dist"
-rem               --clean     (сначала снести build\ и dist\)
-rem               --test      (перед сборкой прогнать тесты сборщика)
-rem               -y          (не задавать вопросов, для CI)
-rem  Неизвестные ключи передаются в tools\build_mod.py как есть.
+rem               --clean     (delete build\ and dist\ first)
+rem               --test      (run the builder's unit tests first)
+rem               -y          (no questions, for CI)
+rem  Unknown options are forwarded to tools\build_mod.py as-is.
+rem
+rem  NOTE: this file is intentionally pure ASCII (no codepage switching), so it
+rem  looks the same on any Windows locale. The builder it runs prints Russian.
 rem ===========================================================================
 
 setlocal
-chcp 1251 >nul
-title Deadlock :: Bhop Trainer HUD - сборка мода
+title Deadlock :: Bhop Trainer HUD - mod builder
 
-rem --- где лежит мод: папка с этим батником, либо bhop-hud-mod рядом ----------
+rem --- locate the mod: this bat's folder, or bhop-hud-mod next to it ----------
 set "MOD_DIR=%~dp0"
 if "%MOD_DIR:~-1%"=="\" set "MOD_DIR=%MOD_DIR:~0,-1%"
 
@@ -43,7 +45,7 @@ set "INSTALL_PY=%TOOLS_DIR%\install_dmm.py"
 set "DIST_DIR=%MOD_DIR%\dist"
 set "BUILD_DIR=%MOD_DIR%\build"
 
-rem --- значения по умолчанию -------------------------------------------------
+rem --- defaults --------------------------------------------------------------
 set "PY_CMD="
 set "GAME_DIR="
 set "CSDK_DIR="
@@ -63,7 +65,7 @@ set "DIST_ARG="
 set "STEAM_PATH="
 set "CSDK_URL=https://deadlockmodding.pages.dev/modding-tools/csdk-12"
 
-rem --- разбор аргументов -----------------------------------------------------
+rem --- parse arguments -------------------------------------------------------
 :parse_args
 if "%~1"=="" goto :args_done
 if /i "%~1"=="--game-path" set "ARG_GAME=%~2" & shift & shift & goto :parse_args
@@ -90,9 +92,9 @@ if defined ARG_OUT set "DIST_ARG=--dist "%ARG_OUT%""
 
 echo.
 echo ============================================================
-echo   Deadlock :: Bhop Trainer HUD - автосборка
+echo   Deadlock :: Bhop Trainer HUD - build
 echo ============================================================
-echo   Мод:  %MOD_DIR%
+echo   Mod:  %MOD_DIR%
 echo   Out:  %DIST_DIR%
 echo.
 
@@ -109,11 +111,11 @@ if defined PY_CMD goto :python_found
 
 :python_missing
 echo.
-echo [!] Python 3.9+ не найден - сборка невозможна.
+echo [!] Python 3.9+ not found - cannot build.
 echo.
-echo     Варианты:
+echo     Options:
 echo       1) winget install -e --id Python.Python.3.12
-echo       2) https://www.python.org/downloads/  (галочка "Add python.exe to PATH")
+echo       2) https://www.python.org/downloads/  (tick "Add python.exe to PATH")
 echo.
 goto :fail
 
@@ -138,22 +140,22 @@ if defined CSDK_DIR goto :csdk_found
 
 :csdk_menu
 echo.
-echo [!] CSDK 12 c resourcecompiler.exe не найден.
-echo     Без него движок Deadlock не грузит мод: нужны скомпилированные
-echo     .vxml_c / .vcss_c, а не сырые .xml / .css.
+echo [!] CSDK 12 with resourcecompiler.exe was not found.
+echo     The Deadlock engine will not load the mod without it: it needs
+echo     compiled .vxml_c / .vcss_c, not raw .xml / .css.
 echo.
-echo     Взять CSDK: %CSDK_URL%
-echo     (не распаковывай в OneDrive / Desktop / Documents - ломаются права)
+echo     Download CSDK: %CSDK_URL%
+echo     (do not unpack it into OneDrive / Desktop / Documents - breaks perms)
 echo.
 if "%NONINTERACTIVE%"=="1" goto :csdk_missing_exit
-echo     [1] Указать путь к CSDK вручную (можно перетащить папку в окно)
-echo     [2] Открыть страницу загрузки CSDK
-echo     [3] Собрать всё равно, только исходники (--allow-uncompiled,
-echo         в игре такой мод не заработает, пакет DMM не собирается)
-echo     [0] Выйти
+echo     [1] Type the CSDK path by hand (you can drag the folder here)
+echo     [2] Open the CSDK download page
+echo     [3] Build anyway, sources only (--allow-uncompiled: such a mod does
+echo         not work in game and no DMM package is produced)
+echo     [0] Quit
 echo.
 set "ANS="
-set /p "ANS=    Номер: "
+set /p "ANS=    Choice: "
 if "%ANS%"=="1" goto :csdk_manual
 if "%ANS%"=="2" goto :csdk_open_url
 if "%ANS%"=="3" goto :csdk_allow_uncompiled
@@ -162,7 +164,7 @@ goto :csdk_menu
 
 :csdk_manual
 echo.
-echo     Вставь путь к распакованному CSDK (внутри должна быть папка
+echo     Paste the path to the unpacked CSDK (it must contain
 echo     game\bin_cs2\win64\resourcecompiler.exe):
 echo.
 set "ANS="
@@ -172,7 +174,7 @@ if not defined ANS goto :csdk_menu
 call :check_csdk "%ANS%"
 if defined CSDK_DIR goto :csdk_found
 echo.
-echo     По этому пути resourcecompiler.exe не нашёлся.
+echo     No resourcecompiler.exe under that path.
 goto :csdk_menu
 
 :csdk_open_url
@@ -182,22 +184,22 @@ goto :csdk_menu
 :csdk_allow_uncompiled
 set "ALLOW_UNCOMPILED=1"
 echo.
-echo [i] Собираю артефакты только с исходниками (в игре не работают).
+echo [i] Building sources-only artifacts (they do not work in game).
 goto :csdk_found
 
 :csdk_missing_exit
-echo [!] CSDK не найден, а ключ -y запрещает вопросы.
+echo [!] CSDK not found and -y forbids questions.
 goto :fail
 
 :csdk_found
 if defined CSDK_DIR echo [i] CSDK:      %CSDK_DIR%
-if /i not "%CSDK_DIR:OneDrive=%"=="%CSDK_DIR%" echo [!] Внимание: CSDK лежит в OneDrive - оттуда компилятор часто падает.
+if /i not "%CSDK_DIR:OneDrive=%"=="%CSDK_DIR%" echo [!] Warning: CSDK sits in OneDrive - the compiler often breaks there.
 
-rem --- сборка ----------------------------------------------------------------
+rem --- build -----------------------------------------------------------------
 :do_build
 echo.
 echo ============================================================
-echo   Сборка
+echo   Building
 echo ============================================================
 echo.
 
@@ -219,24 +221,24 @@ if "%BUILD_RC%"=="130" goto :build_cancel
 
 :build_failed
 echo.
-echo [X] Сборка упала (код %BUILD_RC%).
-echo     Подробности - в %DIST_DIR%\BUILD_REPORT.md
+echo [X] Build failed (exit code %BUILD_RC%).
+echo     Details are in %DIST_DIR%\BUILD_REPORT.md
 goto :fail
 
 :build_cancel
 echo.
-echo [X] Сборку прервали.
+echo [X] Build cancelled.
 goto :fail
 
 :build_needs_compile
 echo.
-echo [!] Сборка остановилась на шаге компиляции (код 3).
-echo     Проверь, что CSDK распакован и в нём есть
+echo [!] The build stopped at the compile step (exit code 3).
+echo     Check that CSDK is unpacked and that it contains
 echo     game\bin_cs2\win64\resourcecompiler.exe
 if "%NONINTERACTIVE%"=="1" goto :fail
 echo.
 set "ANS="
-set /p "ANS=    Собрать только исходники (--allow-uncompiled)? [y/N]: "
+set /p "ANS=    Build sources only (--allow-uncompiled)? [y/N]: "
 if /i "%ANS%"=="y" set "ALLOW_UNCOMPILED=1"
 if /i "%ANS%"=="y" goto :do_build
 if /i "%ANS%"=="d" set "ALLOW_UNCOMPILED=1"
@@ -246,40 +248,40 @@ goto :fail
 :build_ok
 echo.
 echo ============================================================
-echo   Готово
+echo   Done
 echo ============================================================
 echo.
-echo   Артефакты лежат в:
+echo   Artifacts are in:
 echo     %DIST_DIR%
 echo.
-echo     bhop_trainer_dir.vpk   - сам аддон
-echo     dmm-bundle\            - пакет для Deadlock Mod Manager
-echo     bhop_trainer-dmm.zip   - тот же пакет архивом
-echo     BUILD_REPORT.md        - отчёт сборки
-echo     SHA256SUMS.txt         - контрольные суммы
+echo     bhop_trainer_dir.vpk   - the addon itself
+echo     dmm-bundle\            - package for Deadlock Mod Manager
+echo     bhop_trainer-dmm.zip   - the same package as a zip
+echo     BUILD_REPORT.md        - build report
+echo     SHA256SUMS.txt         - checksums
 echo.
-if "%ALLOW_UNCOMPILED%"=="1" echo [!] Это сборка без компилятора: в игре она не заработает.
+if "%ALLOW_UNCOMPILED%"=="1" echo [!] Built without the compiler: it will not work in game.
 if "%ALLOW_UNCOMPILED%"=="1" echo.
 if "%NONINTERACTIVE%"=="1" goto :done
 
 :menu
-echo   Что дальше:
-echo     [1] Открыть папку с пакетом DMM (импорт в Mod Manager)
-echo     [2] Поставить мод в игру напрямую, мимо менеджера
-echo     [3] Скопировать cfg тренажёра в game\citadel\cfg
-echo     [4] Проверить установку
-echo     [5] Открыть отчёт сборки
-echo     [0] Выход
+echo   What next:
+echo     [1] Open the DMM package folder (import into Mod Manager)
+echo     [2] Install the mod into the game directly, no manager
+echo     [3] Copy the trainer .cfg files into game\citadel\cfg
+echo     [4] Verify the installation
+echo     [5] Open the build report
+echo     [0] Quit
 echo.
 set "ANS="
-set /p "ANS=    Номер: "
+set /p "ANS=    Choice: "
 if "%ANS%"=="1" goto :act_stage
 if "%ANS%"=="2" goto :act_direct
 if "%ANS%"=="3" goto :act_cfg
 if "%ANS%"=="4" goto :act_verify
 if "%ANS%"=="5" goto :act_report
 if "%ANS%"=="0" goto :done
-echo     Не понял, попробуй ещё раз.
+echo     Did not get that, try again.
 echo.
 goto :menu
 
@@ -309,16 +311,16 @@ goto :menu
 
 :act_report
 if exist "%DIST_DIR%\BUILD_REPORT.md" start "" notepad "%DIST_DIR%\BUILD_REPORT.md"
-if not exist "%DIST_DIR%\BUILD_REPORT.md" echo     Отчёта нет: %DIST_DIR%\BUILD_REPORT.md
+if not exist "%DIST_DIR%\BUILD_REPORT.md" echo     No report at: %DIST_DIR%\BUILD_REPORT.md
 echo.
 goto :menu
 
 
 rem ==========================================================================
-rem  Подпрограммы
+rem  Subroutines
 rem ==========================================================================
 
-rem --- поиск Python ----------------------------------------------------------
+rem --- find Python -----------------------------------------------------------
 :find_python
 set "PY_CMD="
 call :try_py py -3
@@ -329,7 +331,7 @@ call :try_py python ""
 if defined PY_CMD goto :eof
 call :try_py python3 ""
 if defined PY_CMD goto :eof
-rem winget / установщик кладут Python сюда, даже если PATH не обновился
+rem winget and the official installer drop Python here even if PATH is stale
 for /d %%P in ("%LOCALAPPDATA%\Programs\Python\Python3*") do call :try_py_path "%%P\python.exe" ""
 if defined PY_CMD goto :eof
 if exist "%SystemDrive%\Python312\python.exe" call :try_py_path "%SystemDrive%\Python312\python.exe" ""
@@ -340,7 +342,7 @@ if exist "%SystemDrive%\Python310\python.exe" call :try_py_path "%SystemDrive%\P
 goto :eof
 
 :try_py
-rem %~1 - имя exe (py / python / python3), %~2 - доп. ключи ("-3" или "")
+rem %~1 - exe name (py / python / python3), %~2 - extra switch ("-3" or "")
 set "_py_name=%~1"
 set "_py_extra=%~2"
 set "_py_full="
@@ -348,16 +350,16 @@ for /f "delims=" %%i in ('where %_py_name% 2^>nul') do call :try_py_path "%%i" "
 goto :eof
 
 :try_py_path
-rem %~1 - полный путь к python.exe, %~2 - доп. ключи
+rem %~1 - full path to python.exe, %~2 - extra switch
 if defined PY_CMD goto :eof
 set "_py_full=%~1"
 if not defined _py_full goto :eof
 if not exist "%_py_full%" goto :eof
-rem python.exe из Microsoft Store - это заглушка, она не считается
+rem the Microsoft Store python.exe is only a stub - it does not count
 if /i not "%_py_full:WindowsApps=%"=="%_py_full%" goto :eof
 "%_py_full%" %~2 -c "import sys; sys.exit(0 if sys.version_info[0] == 3 and sys.version_info[1] >= 9 else 1)" >nul 2>nul
 if errorlevel 1 goto :eof
-rem без скобок: в пути может быть "Program Files (x86)"
+rem no parenthesised block here: the path may contain "Program Files (x86)"
 if "%~2"=="" set "PY_CMD=%_py_full%"
 if "%~2"=="" goto :eof
 set "PY_CMD=%_py_full% %~2"
@@ -365,14 +367,14 @@ goto :eof
 
 :offer_python_install
 echo.
-echo [!] Python 3.9+ не найден.
+echo [!] Python 3.9+ not found.
 echo.
-echo     [1] Поставить Python 3.12 самому через winget
-echo     [2] Открыть страницу загрузки Python
-echo     [0] Выйти
+echo     [1] Install Python 3.12 myself via winget
+echo     [2] Open the Python download page
+echo     [0] Quit
 echo.
 set "ANS="
-set /p "ANS=    Номер: "
+set /p "ANS=    Choice: "
 if "%ANS%"=="1" goto :install_python
 if "%ANS%"=="2" goto :open_python_url
 if "%ANS%"=="0" goto :fail
@@ -386,25 +388,25 @@ goto :offer_python_install
 echo.
 where winget >nul 2>nul
 if errorlevel 1 goto :no_winget
-echo [i] Ставлю Python.Python.3.12 через winget...
+echo [i] Installing Python.Python.3.12 with winget...
 winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements
 if errorlevel 1 goto :winget_failed
 echo.
-echo [i] Обновляю PATH в этом окне и ищу Python заново...
+echo [i] Refreshing PATH in this window and looking for Python again...
 call :refresh_path
 goto :eof
 
 :no_winget
-echo [!] winget не найден - поставь Python вручную:
+echo [!] winget is not available - install Python manually:
 echo     https://www.python.org/downloads/windows/
-echo     (при установке отметь "Add python.exe to PATH")
+echo     (tick "Add python.exe to PATH" during setup)
 echo.
-echo     После установки закрой это окно и запусти батник заново.
+echo     Then close this window and run build.bat again.
 goto :fail
 
 :winget_failed
-echo [!] winget не смог поставить Python (код %ERRORLEVEL%).
-echo     Поставь вручную: https://www.python.org/downloads/windows/
+echo [!] winget could not install Python (exit code %ERRORLEVEL%).
+echo     Install it manually: https://www.python.org/downloads/windows/
 goto :fail
 
 :refresh_path
@@ -416,30 +418,30 @@ if defined _sys_path set "PATH=%_sys_path%;%PATH%"
 if defined _usr_path set "PATH=%_usr_path%;%PATH%"
 goto :eof
 
-rem --- очистка ---------------------------------------------------------------
+rem --- clean -----------------------------------------------------------------
 :do_clean
-echo [i] Стираю рабочие каталоги...
+echo [i] Removing working directories...
 if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
 if exist "%DIST_DIR%" rmdir /s /q "%DIST_DIR%"
-echo     готово.
+echo     done.
 echo.
 goto :eof
 
-rem --- тесты -----------------------------------------------------------------
+rem --- tests -----------------------------------------------------------------
 :run_tests
-echo [i] Прогоняю тесты сборщика...
+echo [i] Running the builder's unit tests...
 %PY_CMD% -m unittest discover -s "%MOD_DIR%\tests" -t "%MOD_DIR%" -p "test_*.py"
 if errorlevel 1 goto :tests_failed
-echo     тесты пройдены.
+echo     tests passed.
 echo.
 goto :eof
 
 :tests_failed
 echo.
-echo [X] Тесты упали - сборку останавливаю.
+echo [X] Tests failed - stopping before the build.
 goto :fail
 
-rem --- поиск Deadlock --------------------------------------------------------
+rem --- find Deadlock ---------------------------------------------------------
 :resolve_game
 set "GAME_DIR="
 if defined ARG_GAME call :check_game_dir "%ARG_GAME%"
@@ -451,7 +453,7 @@ if defined GAME_DIR goto :eof
 if defined DEADLOCK_PATH call :check_game_dir "%DEADLOCK_PATH%"
 if defined GAME_DIR goto :eof
 
-rem Steam из реестра
+rem Steam from the registry
 set "STEAM_PATH="
 for /f "tokens=2,*" %%A in ('reg query "HKCU\Software\Valve\Steam" /v SteamPath 2^>nul') do set "STEAM_PATH=%%B"
 if not defined STEAM_PATH for /f "tokens=2,*" %%A in ('reg query "HKLM\Software\WOW6432Node\Valve\Steam" /v InstallPath 2^>nul') do set "STEAM_PATH=%%B"
@@ -465,12 +467,12 @@ if defined GAME_DIR goto :eof
 if defined STEAM_PATH call :scan_libraryfolders "%STEAM_PATH%\config\libraryfolders.vdf"
 if defined GAME_DIR goto :eof
 
-rem типичные места по всем дискам
+rem usual places on every drive
 for %%D in (C D E F G H I J K) do call :scan_game_drive %%D
 goto :eof
 
 :check_game_dir
-rem %~1 - кандидат: корень Deadlock, или ...\game, или ...\game\citadel
+rem %~1 - candidate: Deadlock root, or ...\game, or ...\game\citadel
 set "_g=%~1"
 if not defined _g goto :eof
 if defined GAME_DIR goto :eof
@@ -519,16 +521,16 @@ goto :eof
 
 :game_missing
 echo.
-echo [!] Deadlock не найден, а ванильный hud.xml больше взять неоткуда:
-echo     именно из паков игры сборщик достаёт panorama/layout/hud.xml,
-echo     в который вшивается панель.
+echo [!] Deadlock was not found, and there is nowhere else to take the
+echo     vanilla hud.xml from: the builder reads panorama/layout/hud.xml
+echo     straight out of the game's .vpk packages and patches it.
 echo.
-echo     [1] Указать папку Deadlock вручную (можно перетащить в окно)
-echo     [2] Указать путь к уже сохранённому vanilla hud.xml
-echo     [0] Выйти
+echo     [1] Type the Deadlock folder by hand (you can drag it here)
+echo     [2] Point at an already saved vanilla hud.xml
+echo     [0] Quit
 echo.
 set "ANS="
-set /p "ANS=    Номер: "
+set /p "ANS=    Choice: "
 if "%ANS%"=="1" goto :game_manual_dir
 if "%ANS%"=="2" goto :game_manual_hud
 if "%ANS%"=="0" goto :fail
@@ -537,33 +539,33 @@ goto :game_missing
 :game_manual_dir
 echo.
 set "ANS="
-set /p "ANS=    Папка Deadlock: "
+set /p "ANS=    Deadlock folder: "
 set "ANS=%ANS:"=%"
 if not defined ANS goto :game_missing
 call :check_game_dir "%ANS%"
 if defined GAME_DIR goto :game_found
 echo.
-echo     Там нет game\citadel\gameinfo.gi - это не папка Deadlock.
+echo     There is no game\citadel\gameinfo.gi there - not a Deadlock folder.
 goto :game_missing
 
 :game_manual_hud
 echo.
 set "ANS="
-set /p "ANS=    Путь к hud.xml: "
+set /p "ANS=    Path to hud.xml: "
 set "ANS=%ANS:"=%"
 if not defined ANS goto :game_missing
 if not exist "%ANS%" goto :hud_not_found
 set "ARG_HUD=%ANS%"
-echo [i] Ванильный hud.xml: %ARG_HUD%
-echo [i] Папки игры нет, поэтому установку потом делай через Deadlock Mod Manager.
+echo [i] Vanilla hud.xml: %ARG_HUD%
+echo [i] No game folder, so install later through Deadlock Mod Manager.
 goto :game_found
 
 :hud_not_found
 echo.
-echo     Файл не найден: %ANS%
+echo     File not found: %ANS%
 goto :game_missing
 
-rem --- поиск CSDK ------------------------------------------------------------
+rem --- find CSDK -------------------------------------------------------------
 :resolve_csdk
 set "CSDK_DIR="
 if defined ARG_CSDK call :check_csdk "%ARG_CSDK%"
@@ -592,7 +594,7 @@ for %%D in (C D E F G H I J K) do call :scan_csdk_drive %%D
 goto :eof
 
 :check_csdk
-rem %~1 - кандидат: корень CSDK (внутри game\bin_cs2\win64\resourcecompiler.exe)
+rem %~1 - candidate: CSDK root (contains game\bin_cs2\win64\resourcecompiler.exe)
 set "_c=%~1"
 if not defined _c goto :eof
 if defined CSDK_DIR goto :eof
@@ -620,40 +622,40 @@ if defined CSDK_DIR goto :eof
 call :check_csdk "%~1:\Tools\Deadlock SDK"
 goto :eof
 
-rem --- прочее ----------------------------------------------------------------
+rem --- misc ------------------------------------------------------------------
 :no_sources
 echo.
-echo [!] Рядом с батником нет tools\build_mod.py.
-echo     Положи build.bat в папку bhop-hud-mod\ (или в корень репозитория).
+echo [!] There is no tools\build_mod.py next to this bat.
+echo     Put build.bat into the bhop-hud-mod\ folder (or the repo root).
 goto :fail
 
 :usage
 echo.
-echo   Deadlock :: Bhop Trainer HUD - автосборка мода
+echo   Deadlock :: Bhop Trainer HUD - one-click mod builder
 echo.
-echo   build.bat [ключи]
+echo   build.bat [options]
 echo.
-echo     --game-path PATH     папка Deadlock (или её game\, или game\citadel)
-echo     --csdk PATH          папка CSDK 12 c resourcecompiler.exe
-echo     --hud-xml FILE       готовый ванильный panorama/layout/hud.xml
-echo     --steps LIST         prepare,compile,pack,dmm,report (по умолчанию все)
-echo     --out DIR            куда положить артефакты (по умолчанию dist)
-echo     --version X.Y.Z      версия мода
-echo     --allow-uncompiled   собрать без компилятора (в игре не заработает)
-echo     --clean              сначала удалить build\ и dist\
-echo     --test               перед сборкой прогнать тесты сборщика
-echo     -y                   не задавать вопросов
+echo     --game-path PATH     Deadlock folder (or its game\, or game\citadel)
+echo     --csdk PATH          CSDK 12 folder with resourcecompiler.exe
+echo     --hud-xml FILE       an already saved vanilla panorama/layout/hud.xml
+echo     --steps LIST         prepare,compile,pack,dmm,report (all by default)
+echo     --out DIR            where to put artifacts (dist by default)
+echo     --version X.Y.Z      mod version
+echo     --allow-uncompiled   build without the compiler (will not work in game)
+echo     --clean              delete build\ and dist\ first
+echo     --test               run the builder's unit tests first
+echo     -y                   ask nothing (for CI)
 echo.
-echo   Пример:
+echo   Example:
 echo     build.bat --game-path "D:\Steam\steamapps\common\Deadlock" --csdk "C:\Deadlock SDK"
 echo.
 goto :done
 
 :fail
 echo.
-echo [X] Готово с ошибками. Если непонятно почему - смотри
+echo [X] Finished with errors. If the reason is unclear, look at
 echo     %DIST_DIR%\BUILD_REPORT.md
-echo     и README.md в папке мода.
+echo     and at README.md in the mod folder.
 echo.
 if "%NONINTERACTIVE%"=="1" endlocal & exit /b 1
 endlocal
