@@ -1,39 +1,210 @@
 # Deadlock :: Bhop Trainer — HUD-аддон
 
 Настоящая панель поверх игры: подсказки по банихопу прямо в HUD, в стиле интерфейса Deadlock.
-Собирается из исходников Valve Panorama (`.vxml` + `.vcss`) в аддон-`.vpk` — тем же способом,
-что и любые HUD-моды (например QoL HUD).
+Собирается из исходников Valve Panorama (`.vxml` + `.vcss`) в аддон-`.vpk` и ставится в игру
+через **Deadlock Mod Manager** — вручную ничего править не нужно.
 
-> **Честно о статусе.** Это исходники, а не готовый `.vpk`: скомпилировать их можно только на
-> Windows с установленной Deadlock и CSDK 12 — ни в этой песочнице, ни на Linux-сервере игра
-> недоступна. Скриптов динамики тут нет (только статичная панель), поэтому она не мешает игре,
-> но и не умеет сама переключать шаги — это делается правкой текста или добавлением vjs-скрипта.
+> **Честно о статусе.** Мод собирается из исходников этого репозитория, но для работоспособного
+> VPK нужен `resourcecompiler.exe` из CSDK 12: движок Deadlock не грузит сырые `.css`/`.xml`
+> из аддона, ему нужны скомпилированные `.vcss_c`/`.vxml_c`. Поэтому шаг компиляции — Windows +
+> CSDK, а `prepare`, `pack`, `dmm`, `report` и вся установка работают где угодно (Linux/Proton тоже).
+> Скриптов динамики тут нет (панель статичная), поэтому она не мешает игре, но и не переключает
+> шаги сама — это делается правкой текста или добавлением vjs-скрипта.
 
 ---
 
-## Что внутри
+## Быстрый путь: собрать → поставить через DMM
 
-| Файл | Что это |
+```bash
+cd bhop-hud-mod
+
+# 1. Сборка: ванильный hud.xml берётся прямо из паков установленной игры
+python3 tools/build_mod.py --game-path "/mnt/games/Steam/steamapps/common/Deadlock" \
+                           --csdk "/mnt/c/Deadlock SDK"
+
+# 2. Выложить пакет в удобное место и подсказать шаги
+python3 tools/install_dmm.py stage --open
+```
+
+Дальше в **Deadlock Mod Manager**: *Mods → Import → Open interchange bundle* → выбрать
+`mod-interchange.json` из выложенной папки → закрыть Deadlock → **Launch modded**.
+DMM сам добавит `Game citadel/addons` в `gameinfo.gi` и положит мод в `citadel/addons` как
+`pakNN_dir.vpk`.
+
+Проверка, что всё встало:
+
+```bash
+python3 tools/install_dmm.py verify
+```
+
+Команда смотрит в `game/citadel/addons`, находит там наш VPK, читает его метаданные и проверяет
+строку поиска в `gameinfo.gi`. Если игру нужно вернуть в исходное состояние —
+`python3 tools/install_dmm.py uninstall --restore-gameinfo`.
+
+### Полезные варианты запуска сборщика
+
+| Задача | Команда |
 |---|---|
-| `src/bhop_trainer.vxml` | Разметка панели. Вставляется **внутрь игрового `hud.xml`** перед `</CitadelHud>` |
-| `src/bhop_trainer.vcss` | Стили: палитра движка, ар-деко рамка, пульсация номера шага |
+| Собрать всё (по умолчанию: `prepare,compile,pack,dmm,report`) | `python3 tools/build_mod.py --game-path … --csdk …` |
+| Есть только «CSDK» без игры, ванильный `hud.xml` лежит файлом | `… --hud-xml /path/to/hud.xml --csdk …` |
+| Игра есть, CSDK нет (проверить пайплайн, без компиляции) | `… --game-path … --allow-uncompiled` |
+| Только подготовить дерево аддона + патч `hud.xml` | `… --steps prepare` |
+| Компилятор кладёт результат в нестандартное место | `… --compiled-from /путь/к/дереву` |
+| Упаковать дерево, скомпилированное вручную в CSDK | `… --csdk PATH --steps prepare,pack` |
+| Итог в JSON (для CI) | `… --json` (логи уходят в stderr, в stdout — только JSON) |
+| Другой номер/название сборки | `… --version 1.2.0 --title "Bhop Trainer (test)" --addon-name bhopt_test` |
 
-## Палитра (взято из `citadel_base_styles.css` самой игры)
-
-| Токен | HEX | Где взят |
-|---|---|---|
-| `bhoptText` | `#FFEFD7` | `baseText` — основной текст игры |
-| `bhoptGold` | `#FFED79` | `goldColor` — акценты, ключи |
-| `bhoptSoul` | `#70F8C1` | `soulColor` — «зелёный душ» (резерв под успех) |
-| `bhoptEnemy` | `#FF410D` | `colorEnemy` — предупреждения |
-| `bhoptBackdrop` | `#10130D` | `offBlack` — фон HUD |
-| Шрифты | `Reaver`, `Radiance`, `Retail Text Demo` | `@define` из игрового CSS |
+Коды возврата: `0` — всё собрано, `2` — ошибка, `3` — сборка остановлена на компиляции
+(не найден CSDK; артефакты «только исходники» не создаются, если не передан `--allow-uncompiled`).
 
 ---
 
-## Сборка (Windows)
+## Что производит сборщик
 
-1. **Поставить CSDK 12** — https://deadlockmodding.pages.dev/modding-tools/csdk-12
+| Артефакт в `dist/` | Что это |
+|---|---|
+| `bhop_trainer_dir.vpk` | Готовый аддон: `panorama/layout/hud.vxml_c`, `panorama/styles/bhop_trainer.vcss_c` + метаданные |
+| `dmm-bundle/` | Пакет для Deadlock Mod Manager (`mod-interchange.json` + `files/…`) |
+| `bhop_trainer-dmm.zip` | Тот же пакет архивом: можно распаковать (для импорта) или перетащить целиком в DMM в «Add Mods» |
+| `SHA256SUMS.txt` | Контрольные суммы артефактов |
+| `BUILD_REPORT.md` | Отчёт: статус, входные хеши, что попало в VPK, заметки и предупреждения |
+
+Рабочие файлы (не коммитятся): `build/content/citadel_addons/<addon>` — дерево аддона для CSDK,
+`build/game/citadel_addons/<addon>` — скомпилированные ресурсы, `build/vanilla/hud.xml` — копия
+ванильного файла, из которого делался патч, `build/build_state.json` — состояние сборки.
+
+### Как устроена установка через DMM
+
+Deadlock Mod Manager (DMM) умеет принимать сторонние моды двумя путями, и сборщик готовит оба:
+
+1. **Импорт пакета** — формат «Deadlock Mod Interchange» из RFC самого DMM: каталог с
+   `mod-interchange.json` и `files/<папка>/<файл>.vpk`. В DMM это
+   *Import → Open interchange bundle* → выбрать манифест.
+2. **Перетаскивание архива** — zip бросается в раздел *Add Mods*, DMM распаковывает его
+   и находит `.vpk` рекурсивно.
+
+Идентификаторы выбраны так, чтобы повторный импорт распознавался как дубликат, а мод оставался
+узнаваемым без сети:
+
+* `key` = `local:<sha256 VPK>` — так спецификация предписывает идентифицировать локальные моды;
+* `origin.localId` = `local-<uuid>`, uuid выводится из ключа ровно тем же способом, что и в
+  импортере DMM (`uuid_from_seed`), поэтому его принимает `SubmissionRef::parse_slug`;
+* внутрь VPK вшиты метаданные **vpk-modinfo v1** (`addoninfo.txt` + `modinfo.json`): название,
+  автор, версия и «канонический» хеш файла до прошивки. Их показывают браузеры VPK, и по ним мод
+  опознаётся другими менеджерами (например Grimoire).
+
+### Запасной путь без менеджера
+
+Если DMM недоступен (или нужно поставить вручную):
+
+```bash
+python3 tools/install_dmm.py direct --dry-run   # посмотреть план
+python3 tools/install_dmm.py direct             # свободный слот pakNN_dir.vpk + строка в gameinfo.gi
+```
+
+`direct` копирует VPK в `game/citadel/addons/pakNN_dir.vpk` (первый свободный слот 1–99) и
+добавляет в `gameinfo.gi` строку `Game citadel/addons` со своим маркером-комментарием,
+предварительно сохранив копию `gameinfo.gi.bhop-bak-<дата>`. Перед записью проверяется баланс
+фигурных скобок: сломанный `gameinfo.gi` не даёт игре запуститься, поэтому при подозрении правка
+отменяется. Откат — `install_dmm.py uninstall`, при необходимости `--restore-gameinfo`.
+
+Конфиги самого тренажёра (`.cfg` из соседней папки `bhop-trainer/`) в VPK не влезают и менеджером
+не ставятся, поэтому для них отдельная команда:
+
+```bash
+python3 tools/install_dmm.py cfg              # скопировать .cfg в game/citadel/cfg
+python3 tools/install_dmm.py cfg --dry-run    # только показать, что будет скопировано
+```
+
+---
+
+## Зачем нужен CSDK: компиляция Panorama
+
+В layout-файлах ресурсы адресуются «исходными» именами:
+
+```xml
+<include src="s2r://panorama/styles/bhop_trainer.vcss" />
+```
+
+но искать движок будет `bhop_trainer.vcss_c` — скомпилированный ресурс. Ровно поэтому работает
+шаг `compile`:
+
+| Исходник | Скомпилированный ресурс |
+|---|---|
+| `panorama/layout/hud.xml` | `panorama/layout/hud.vxml_c` |
+| `panorama/styles/bhop_trainer.vcss` | `panorama/styles/bhop_trainer.vcss_c` |
+| `.js` / `.vjs` | `.vjs_c` |
+| `.svg`, `.png`, `.wav` | `.vsvg_c`, `.vtex_c`, `.vsnd_c` |
+
+Сборщик запускает `resourcecompiler.exe` из CSDK (`<CSDK>/game/bin_cs2/win64`), складывая исходники
+в `<CSDK>/content/citadel_addons/<addon>` и забирая результат из `<CSDK>/game/citadel_addons/<addon>`.
+Пути CSDK ищутся в `--csdk`, переменных `DEADLOCK_CSDK` / `CSDK_ROOT` / `CSDK_PATH` и типичных местах;
+скачать CSDK 12: <https://deadlockmodding.pages.dev/modding-tools/csdk-12> (не распаковывать в OneDrive).
+
+Без компилятора:
+
+* обычный запуск останавливается с кодом `3` и объяснением (это честнее, чем отдать нерабочий VPK);
+* с `--allow-uncompiled` собираются артефакты **только для проверки пайплайна** — VPK с сырыми
+  исходниками кладётся в `dist/sources-only/`, пакет для DMM не создаётся вообще.
+
+Свой компилятор (например, обёртку над `resourcecompiler.exe` или заглушку в CI) можно подставить
+через `--compiler-cmd` с плейсхолдерами
+`{compiler} {sdk} {game} {addon} {source} {content_root} {output_root}`;
+именно так работают тесты в `tests/`.
+
+### Где сборщик ищет результат компиляции
+
+`resourcecompiler` из CSDK игнорирует «куда положить» и пишет в своё game-дерево, поэтому шаг
+compile перебирает известные места и берёт первое, где лежит непустой ресурс:
+
+1. `build/game/citadel_addons/<addon>` — если компилятор вызван обёрткой с явным output-каталогом;
+2. `--compiled-from DIR` — если ты указал его сам;
+3. `<CSDK>/game/citadel_addons/<addon>` — штатное место CSDK;
+4. дерево самой игры (`<Deadlock>/game`) — так получается при компиляции прямо в дереве игры.
+   Отсюда ресурсы берутся, **только если они появились или обновились в этом запуске**, и после
+   копирования удаляются: сборка не должна оставлять мусор в файлах игры.
+
+Если ресурс не найден нигде, сборка останавливается с подсказкой указать `--compiled-from`.
+Дополнительно: если скомпилированный ресурс оказался старее своего исходника, сборщик
+предупреждает об этом — значит, компиляция его не обновила.
+
+---
+
+## Инструменты
+
+| Файл | Назначение |
+|---|---|
+| `tools/build_mod.py` | Автосборщик: `prepare → compile → pack → dmm → report` |
+| `tools/install_dmm.py` | Установщик: `check`, `stage`, `verify`, `direct`, `uninstall`, `cfg` |
+| `tools/vpk.py` | VPK v2: запись, чтение, проверка; умеет доставать файлы из паков игры (в т.ч. многокомпонентных) |
+| `tools/modinfo.py` | Метаданные `vpk-modinfo v1` внутрь VPK (`addoninfo.txt` + `modinfo.json`) |
+| `tools/hud_patch.py` | Патч `hud.xml`: вставка панели и include стилей, идемпотентно, с откатом |
+| `tools/dmm_bundle.py` | Пакет «Deadlock Mod Interchange» и zip для DMM |
+| `tools/paths.py` | Поиск Deadlock / CSDK / данных DMM, проверка запущенного процесса игры |
+| `tools/gameinfo.py` | Проверка и правка `gameinfo.gi` с резервными копиями |
+
+Требуется только Python 3.9+ (стандартная библиотека, без зависимостей).
+
+## Тесты
+
+```bash
+cd bhop-hud-mod
+python3 -m unittest discover -s tests -p "test_*.py"
+```
+
+Проверяется: байтовая раскладка VPK и её соответствие тому, что читает DMM, чтение
+многокомпонентных паков, правила `vpk-modinfo`, патч `hud.xml` (идемпотентность, CRLF, откат),
+пакет interchange (ключи, пути, хеши), установщик (gameinfo, слоты, dry-run) и сквозная сборка
+через `fixtures/fake_compiler.py`. Фикстуры написаны в этом репозитории — игровые файлы Valve
+(в том числе настоящий `hud.xml`) не коммитятся, а берутся из установленной игры.
+
+---
+
+## Ручная сборка (Windows + CSDK, без автосборщика)
+
+Если нужно повторить всё руками — шаги те же, что делает `build_mod.py`:
+
+1. **Поставить CSDK 12** — <https://deadlockmodding.pages.dev/modding-tools/csdk-12>
    (не распаковывать в OneDrive: Desktop/Documents ломают права и инструменты падают).
 2. **Создать аддон** в `csdkcfg.exe`: имя строчными буквами без пробелов, например `bhop_trainer`.
    Появятся `content/citadel_addons/bhop_trainer` и `game/citadel_addons/bhop_trainer`.
@@ -52,17 +223,33 @@
    (или Asset Browser → правый клик по файлам → *Recompile > Full*).
    Ожидаемые результаты: `game/citadel_addons/bhop_trainer/panorama/layout/hud.vxml_c`
    и `panorama/styles/bhop_trainer.vcss_c`.
-7. **Упаковать**: правый клик по аддону → *Create VPK*, либо CS2 Workshop Manager (New → Submit
-   намеренно упадёт, но VPK появится в `game/citadel_addons`).
+7. **Упаковать**: правый клик по аддону → *Create VPK*, либо CS2 Workshop Manager намеренно
+   уронить на Submit (VPK появится в `game/citadel_addons`). Вариант без Windows — взять
+   скомпилированное дерево и упаковать его сборщиком:
+   `python3 tools/build_mod.py --csdk <CSDK> --steps prepare,pack`; либо просто скопировать
+   `game/citadel_addons/<addon>` в `build/game/citadel_addons/<addon>` и запустить
+   `… --steps pack` без `--allow-uncompiled`.
 8. **Поставить в игру**: положить VPK в `Deadlock/game/citadel/addons` под именем
-   `pak02_dir.vpk` (номер 01–99, меньший = выше приоритет), `gameinfo.gi` должен содержать
-   `Game citadel/addons` в `SearchPaths`. Полностью выйти из игры и запустить заново.
+   `pakNN_dir.vpk` (номер 01–99), `gameinfo.gi` должен содержать `Game citadel/addons`
+   в `SearchPaths`. Полностью выйти из игры и запустить заново. Проще —
+   `python3 tools/install_dmm.py direct`.
 
 ---
 
+## Палитра (взято из `citadel_base_styles.css` самой игры)
+
+| Токен | HEX | Где взят |
+|---|---|---|
+| `bhoptText` | `#FFEFD7` | `baseText` — основной текст игры |
+| `bhoptGold` | `#FFED79` | `goldColor` — акценты, ключи |
+| `bhoptSoul` | `#70F8C1` | `soulColor` — «зелёный душ» (резерв под успех) |
+| `bhoptEnemy` | `#FF410D` | `colorEnemy` — предупреждения |
+| `bhoptBackdrop` | `#10130D` | `offBlack` — фон HUD |
+| Шрифты | `Reaver`, `Radiance`, `Retail Text Demo` | `@define` из игрового CSS |
+
 ## Настройка вида
 
-Правки — прямо в `src/bhop_trainer.vcss`:
+Правки — прямо в `src/bhop_trainer.vcss` (после правки — пересобрать):
 
 | Что хочется | Что менять |
 |---|---|
@@ -76,9 +263,10 @@
 ## Динамика (по желанию)
 
 Сейчас панель статична. Чтобы переключать шаги из игры, нужен скрипт:
-`panorama/scripts/bhop_trainer.vjs` + `<include src="s2r://panorama/scripts/bhop_trainer.vjs_c" />`
-и консольная команда/`CitadelHud`-хук. Тогда `J` будет листать содержимое, а `M` — показывать
-блок скорости. Это следующий шаг: если нужен — скажи, добавлю vjs-скрипт и разметку под него.
+`panorama/scripts/bhop_trainer.vjs` + `<include src="s2r://panorama/scripts/bhop_trainer.vjs" />`
+внутри `<scripts>` и консольная команда/`CitadelHud`-хук. Тогда `J` будет листать содержимое,
+а `M` — показывать блок скорости. Скрипты кладутся в `src/`, автоматически попадают в дерево
+аддона и компилируются в `.vjs_c` — сборщик менять не нужно.
 
 > Важно: скрипты не должны давать игрового преимущества и не читают состояние матча — только
 > ведут твой собственный тренажёр, поэтому панель остаётся клиентской косметикой.
@@ -89,9 +277,13 @@
 
 | Симптом | Причина / решение |
 |---|---|
-| Панели нет в игре | Аддон не подключён: проверь `gameinfo.gi` (`Game citadel/addons`), имя `pak##_dir.vpk`, папку `citadel/addons` |
-| Панель есть, стилей нет | Не подключён `.vcss`: проверь `<include src="s2r://panorama/styles/bhop_trainer.vcss" />` и что файл скомпилировался в `_c` |
-| Панель в странном месте | Panorama считает от родителя: правь `margin-left/top` в `.bhopt_panel` и синхронно в скобках |
+| Панели нет в игре | Прогони `python3 tools/install_dmm.py verify`: он показывает, найден ли VPK в `citadel/addons` и есть ли строка `Game citadel/addons` в `gameinfo.gi` |
+| Мод импортировался в DMM, но не работает | Скорее всего игра была запущена: DMM не патчит `gameinfo.gi` при живом `citadel.exe`. Закрой игру и нажми **Launch modded** |
+| Сборка встала с кодом 3 | Не найден CSDK: передай `--csdk` (или переменную `DEADLOCK_CSDK`). Скачать: deadlockmodding.pages.dev/modding-tools/csdk-12 |
+| Панель есть, стилей нет | Не скомпилировался `.vcss`: проверь в отчёте, что в VPK есть `panorama/styles/bhop_trainer.vcss_c` |
+| В VPK только исходники | Был запуск с `--allow-uncompiled`: такой аддон в игре не работает, пересобери с CSDK |
+| Два HUD-мода конфликтуют | Оба кладут свой `panorama/layout/hud.xml`; побеждает меньший номер `pakNN`. Держи этот мод в отдельном слоте (DMM умеет менять порядок) |
 | Текст «плывёт», буквы не те | Проверь, что шрифт — `Reaver`/`Radiance`; иначе упадёт на дефолтный |
-| Игра не стартует, ошибка `hud.vxml` | Синтаксис вставки: тег не закрыт или вставлен не внутрь `CitadelHud` |
-| После патча всё сломалось | Valve обновляет `hud.xml`; заново достань vanilla-файл, вставь сниппет, пересобери |
+| После патча игры всё сломалось | Valve обновляет `hud.xml`: игра читает новый layout, а наш мод — старый. Пересобери с `--game-path` (ванильный файл вытянется заново) и переустанови |
+| Игра не стартует, `KeyValues`-ошибка | Сломан `gameinfo.gi`. `install_dmm.py uninstall --restore-gameinfo` вернёт копию, либо Steam → «Проверить целостность файлов» |
+| Хочу вернуть как было | `python3 tools/install_dmm.py uninstall --restore-gameinfo` (и удалить мод в DMM, если ставил через него) |
