@@ -8,6 +8,8 @@
 > VPK нужен `resourcecompiler.exe` из CSDK 12: движок Deadlock не грузит сырые `.css`/`.xml`
 > из аддона, ему нужны скомпилированные `.vcss_c`/`.vxml_c`. Поэтому шаг компиляции — Windows +
 > CSDK, а `prepare`, `pack`, `dmm`, `report` и вся установка работают где угодно (Linux/Proton тоже).
+> CSDK больше **не надо скачивать руками**: если компилятора нет, сборщик сам качает и распаковывает
+> Reduced CSDK 12 (`tools/csdk_setup.py`, отключается ключом `--no-auto-csdk` / `--no-csdk-download`).
 > Скриптов динамики тут нет (панель статичная), поэтому она не мешает игре, но и не переключает
 > шаги сама — это делается правкой текста или добавлением vjs-скрипта.
 
@@ -26,6 +28,9 @@
   `~/Deadlock SDK`, `~/Desktop|Downloads|Documents\Deadlock SDK`, корни дисков.
   Найденный путь проверяется на `game\bin_cs2\win64\resourcecompiler.exe`, а если это
   OneDrive — предупреждает: оттуда компилятор обычно падает;
+* если CSDK так и не нашёлся, **скачивает и распаковывает его сам** (пункт `[1]` в меню,
+  он же вариант по умолчанию): Reduced CSDK 12, в каталог вне OneDrive/Desktop/Documents,
+  с догрузкой при обрыве и кэшем архива, чтобы не качать гигабайты дважды;
 * собирает VPK и пакет DMM, а в конце предлагает выложить пакет, поставить мод
   напрямую, скопировать `.cfg` тренажёра, проверить установку или открыть отчёт.
 
@@ -33,12 +38,17 @@
 build.bat
 build.bat --game-path "D:\Steam\steamapps\common\Deadlock" --csdk "C:\Deadlock SDK"
 build.bat --clean --test -y
+build.bat --clean -y --csdk-install-dir "C:\DeadlockModding"
 ```
 
 | Ключ | Что делает |
 |---|---|
 | `--game-path PATH` | папка Deadlock (или её `game\`, или `game\citadel`) |
 | `--csdk PATH` | папка CSDK 12 с `resourcecompiler.exe` |
+| `--no-csdk-download` | ничего не качать: только спросить путь к уже распакованному CSDK |
+| `--csdk-install-dir PATH` | куда распаковать скачанный CSDK (по умолчанию `%LOCALAPPDATA%\DeadlockModding\Reduced_CSDK_12`) |
+| `--csdk-url URL` | своя ссылка на архив CSDK (если официальная поменялась) |
+| `--csdk-redownload` | игнорировать кэш и скачать архив заново |
 | `--hud-xml FILE` | уже сохранённый ванильный `panorama/layout/hud.xml` (если игры нет) |
 | `--steps LIST` | `prepare,compile,pack,dmm,report` (по умолчанию все) |
 | `--out DIR` | куда положить артефакты (по умолчанию `dist`) |
@@ -46,7 +56,7 @@ build.bat --clean --test -y
 | `--allow-uncompiled` | собрать без компилятора: в игре такой мод не заработает |
 | `--clean` | сначала удалить `build\` и `dist\` |
 | `--test` | перед сборкой прогнать тесты сборщика |
-| `-y` | не задавать вопросов (для CI), не ждать нажатия клавиши |
+| `-y` | совсем без вопросов: сам ставит Python и CSDK, не ждёт нажатия клавиши (для CI) |
 
 Неизвестные ключи пробрасываются в `tools\build_mod.py` как есть
 (например `--compiler-cmd` или `--addon-name`).
@@ -93,7 +103,11 @@ python3 tools/install_dmm.py verify
 |---|---|
 | Собрать всё (по умолчанию: `prepare,compile,pack,dmm,report`) | `python3 tools/build_mod.py --game-path … --csdk …` |
 | Есть только «CSDK» без игры, ванильный `hud.xml` лежит файлом | `… --hud-xml /path/to/hud.xml --csdk …` |
-| Игра есть, CSDK нет (проверить пайплайн, без компиляции) | `… --game-path … --allow-uncompiled` |
+| CSDK не установлен — пусть сборщик поставит его сам | `… --game-path …` (по умолчанию так и есть) |
+| Категорически без сети | `… --game-path … --no-auto-csdk` |
+| Игра есть, компилятор не нужен (проверить пайплайн) | `… --game-path … --allow-uncompiled` |
+| Собрать с нуля, удалив `build/` и `dist/` | `… --game-path … --clean` |
+| Только поставить CSDK, ничего не собирая | `python3 tools/csdk_setup.py` |
 | Только подготовить дерево аддона + патч `hud.xml` | `… --steps prepare` |
 | Компилятор кладёт результат в нестандартное место | `… --compiled-from /путь/к/дереву` |
 | Упаковать дерево, скомпилированное вручную в CSDK | `… --csdk PATH --steps prepare,pack` |
@@ -101,7 +115,40 @@ python3 tools/install_dmm.py verify
 | Другой номер/название сборки | `… --version 1.2.0 --title "Bhop Trainer (test)" --addon-name bhopt_test` |
 
 Коды возврата: `0` — всё собрано, `2` — ошибка, `3` — сборка остановлена на компиляции
-(не найден CSDK; артефакты «только исходники» не создаются, если не передан `--allow-uncompiled`).
+(CSDK не найден и не скачался, либо автоскачивание отключено; артефакты «только исходники»
+не создаются, если не передан `--allow-uncompiled`).
+
+### Автоустановка CSDK: что именно происходит
+
+Шаг 0 сборки (`tools/csdk_setup.py`) включается, только если компилятор реально нужен
+(есть шаг `compile`, нет `--compiler-cmd` и `--allow-uncompiled`):
+
+1. Сначала — обычный поиск: `--csdk`, переменные окружения, типичные каталоги. Нашли — ничего
+   не качаем: повторная сборка ничего не скачивает.
+2. Не нашли — качаем Reduced CSDK 12 с Google Диска по ссылке со страницы
+   <https://deadlockmodding.pages.dev/modding-tools/csdk-12>: страница подтверждения
+   обходится сама, пользовательский агент и cookie подставляются сами.
+3. Пишем в `<каталог установки>/../csdk-cache/download.part`, поэтому **обрыв связи не
+   обнуляет прогресс**: следующий запуск догружает хвост по HTTP Range. Архив из кэша
+   переиспользуется, `--csdk-redownload` заставляет качать заново.
+4. Распаковываем `.zip` / `.tar.*` средствами Python; для `.7z` / `.rar` берём 7-Zip, а если
+   его нет — ставим через `winget` (отключается `--no-tool-install`).
+5. Приводим раскладку к корню CSDK: если внутри архива лежит папка `Reduced_CSDK_12`,
+   её содержимое поднимается на уровень выше. Проверяем, что на месте
+   `game/bin_cs2/win64/resourcecompiler.exe`, и только после этого подменяем прошлую установку.
+6. Куда ставим: `%LOCALAPPDATA%\DeadlockModding\Reduced_CSDK_12` (на Windows) —
+   пользовательский каталог, не синхронизируемый облаком. Путь с `OneDrive`, `Desktop`,
+   `Documents`, `Dropbox` и т.п. **отвергается**: оттуда инструменты CSDK падают.
+
+Отдельный запуск (только установка, без сборки):
+
+```bash
+python3 tools/csdk_setup.py                       # найти или скачать
+python3 tools/csdk_setup.py --install-dir C:\csdk12
+python3 tools/csdk_setup.py --url https://example.org/Reduced_CSDK_12.zip --sha256 <хеш>
+python3 tools/csdk_setup.py --no-download         # только поиск (код 3, если не найден)
+python3 tools/csdk_setup.py --json                # итог машинно-readable
+```
 
 ---
 
@@ -186,6 +233,8 @@ python3 tools/install_dmm.py cfg --dry-run    # только показать, �
 в `<CSDK>/content/citadel_addons/<addon>` и забирая результат из `<CSDK>/game/citadel_addons/<addon>`.
 Пути CSDK ищутся в `--csdk`, переменных `DEADLOCK_CSDK` / `CSDK_ROOT` / `CSDK_PATH` и типичных местах;
 скачать CSDK 12: <https://deadlockmodding.pages.dev/modding-tools/csdk-12> (не распаковывать в OneDrive).
+Руками этого делать не нужно — как именно сборщик ставит CSDK сам, описано выше, в разделе
+«Автоустановка CSDK».
 
 Без компилятора:
 
@@ -228,6 +277,7 @@ compile перебирает известные места и берёт пер�
 | `tools/hud_patch.py` | Патч `hud.xml`: вставка панели и include стилей, идемпотентно, с откатом |
 | `tools/dmm_bundle.py` | Пакет «Deadlock Mod Interchange» и zip для DMM |
 | `tools/paths.py` | Поиск Deadlock / CSDK / данных DMM, проверка запущенного процесса игры |
+| `tools/csdk_setup.py` | Автоустановка CSDK 12: поиск, скачивание с догрузкой, распаковка, проверка компилятора |
 | `tools/gameinfo.py` | Проверка и правка `gameinfo.gi` с резервными копиями |
 
 Требуется только Python 3.9+ (стандартная библиотека, без зависимостей).
@@ -326,9 +376,14 @@ python3 -m unittest discover -s tests -p "test_*.py"
 |---|---|
 | Панели нет в игре | Прогони `python3 tools/install_dmm.py verify`: он показывает, найден ли VPK в `citadel/addons` и есть ли строка `Game citadel/addons` в `gameinfo.gi` |
 | Мод импортировался в DMM, но не работает | Скорее всего игра была запущена: DMM не патчит `gameinfo.gi` при живом `citadel.exe`. Закрой игру и нажми **Launch modded** |
-| Сборка встала с кодом 3 | Не найден CSDK: передай `--csdk` (или переменную `DEADLOCK_CSDK`). Скачать: deadlockmodding.pages.dev/modding-tools/csdk-12 |
+| Сборка встала с кодом 3 | CSDK не нашёлся и не скачался: проверь сеть, потом `--csdk` (или переменную `DEADLOCK_CSDK`). Скачать руками: deadlockmodding.pages.dev/modding-tools/csdk-12 |
+| Сборка качает CSDK, но не может | Ссылка на файл Google Диска могла измениться: возьми свежую со страницы CSDK 12 и передай её через `--csdk-url URL`. Свой распакованный каталог — `--csdk PATH` |
+| Скачивание обрывается | Не страшно: запусти сборку снова — докачает с того же места (`csdk-cache/download.part`). Начать заново: `--csdk-redownload` |
+| Архив CSDK не распаковывается (`.7z`/`.rar`) | Нужен 7-Zip: `winget install -e --id 7zip.7zip` (сборщик пытается поставить его сам), либо распакуй руками и укажи `--csdk PATH` |
+| Сборщик отказывается ставить CSDK в мой каталог | В пути есть OneDrive/Desktop/Documents/Dropbox — там ломаются права. Задай `--csdk-install-dir PATH` вне синхронизации |
+| Распаковка CSDK падает на длинных путях | Ограничение Windows MAX_PATH: задай короткий каталог, например `--csdk-install-dir C:\csdk12` |
 | Панель есть, стилей нет | Не скомпилировался `.vcss`: проверь в отчёте, что в VPK есть `panorama/styles/bhop_trainer.vcss_c` |
-| В VPK только исходники | Был запуск с `--allow-uncompiled`: такой аддон в игре не работает, пересобери с CSDK |
+| В VPK только исходники | Был запуск с `--allow-uncompiled`: такой аддон в игре не работает, пересобери с CSDK (сейчас он ставится сам) |
 | Два HUD-мода конфликтуют | Оба кладут свой `panorama/layout/hud.xml`; побеждает меньший номер `pakNN`. Держи этот мод в отдельном слоте (DMM умеет менять порядок) |
 | Текст «плывёт», буквы не те | Проверь, что шрифт — `Reaver`/`Radiance`; иначе упадёт на дефолтный |
 | `build.bat` пишет «Python 3.9+ не найден» | Поставь Python (вариант [1] в меню батника — через `winget`) и перезапусти батник: в уже открытом окне PATH мог не обновиться |

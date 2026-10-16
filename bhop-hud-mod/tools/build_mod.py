@@ -3,6 +3,12 @@
 
 Что делает по шагам (``--steps``):
 
+0. внутри шага ``compile`` (если нет ``--compiler-cmd`` и
+   ``--allow-uncompiled``) CSDK ищется, а при отсутствии скачивается и
+   распаковывается сам (``tools/csdk_setup.py``). Отключить можно флагом
+   ``--no-auto-csdk``. С ``--clean`` сборка идёт с нуля: рабочие каталоги
+   удаляются перед стартом.
+
 1. ``prepare`` — берёт ванильный ``panorama/layout/hud.xml`` (из явного файла
    или прямо из паков установленной игры), вставляет туда панель из
    ``src/bhop_trainer.vxml`` и подключает ``src/bhop_trainer.vcss``; собирает
@@ -42,6 +48,7 @@ from typing import Any, Callable, Sequence
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import csdk_setup  # noqa: E402
 import dmm_bundle  # noqa: E402
 import hud_patch  # noqa: E402
 import modinfo  # noqa: E402
@@ -369,6 +376,9 @@ def step_compile(ctx: Context) -> None:
     if not sources:
         raise SystemExit("нет дерева аддона: сначала выполни шаг prepare")
 
+    # CSDK ищем здесь, а не в main: до шага prepare сборка может упасть по
+    # другой причине, и качать гигабайтный архив было бы незачем.
+    _ensure_csdk(ctx)
     resolver = _resolve_compiler(ctx)
     if resolver.compiler is None and not ctx.args.compiler_cmd:
         if not ctx.args.allow_uncompiled:
@@ -376,6 +386,8 @@ def step_compile(ctx: Context) -> None:
             ctx.warn(
                 "не найден CSDK с resourcecompiler.exe — сборка остановлена на шаге compile.\n"
                 "  Варианты:\n"
+                "   • разрешить автоустановку (по умолчанию включена, отключается --no-auto-csdk):\n"
+                "     сборщик сам скачает и распакует Reduced CSDK 12;\n"
                 "   • скачать CSDK 12 (https://deadlockmodding.pages.dev/modding-tools/csdk-12) и передать --csdk PATH;\n"
                 "   • собрать только исходники для проверки: --allow-uncompiled."
             )
@@ -760,6 +772,9 @@ def _render_report(ctx: Context) -> str:
         f"- Ванильный hud.xml: {ctx.state.get('hud_source_label', 'нет данных')}",
         f"  - sha256 оригинала: `{ctx.state.get('hud_vanilla_sha256', '')}`",
         f"  - sha256 после патча: `{ctx.state.get('hud_patched_sha256', '')}`",
+        f"- Компилятор CSDK: `{ctx.state.get('csdk_compiler') or 'не найден'}`",
+        f"  - статус: `{ctx.state.get('csdk_status', 'не потребовался')}`"
+        + (f", каталог `{ctx.state['csdk_root']}`" if ctx.state.get("csdk_root") else ""),
         f"- Сниппет `src/bhop_trainer.vxml`: sha256 `{ctx.state.get('snippet_sha256', '')[:32]}…`",
         f"- Стили `src/bhop_trainer.vcss`: sha256 `{ctx.state.get('styles_sha256', '')[:32]}…`",
         "",
@@ -813,6 +828,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hud-xml", help="явный путь к ванильному panorama/layout/hud.xml")
     parser.add_argument("--csdk", help="путь к CSDK с resourcecompiler.exe")
     parser.add_argument(
+        "--no-auto-csdk",
+        dest="auto_csdk",
+        action="store_false",
+        help="не скачивать CSDK автоматически, если он не найден",
+    )
+    parser.add_argument("--csdk-install-dir", help="куда распаковать скачанный CSDK (по умолчанию — вне OneDrive)")
+    parser.add_argument("--csdk-cache-dir", help="куда сложить скачанный архив CSDK")
+    parser.add_argument("--csdk-url", help="своя ссылка на архив CSDK (по умолчанию — со страницы CSDK 12)")
+    parser.add_argument("--csdk-sha256", help="контрольная сумма архива CSDK")
+    parser.add_argument("--csdk-redownload", action="store_true", help="скачать CSDK заново, игнорируя кэш")
+    parser.add_argument(
+        "--no-tool-install",
+        action="store_true",
+        help="не ставить 7-Zip через winget (нужен, если архив CSDK в .7z/.rar)",
+    )
+    parser.add_argument(
         "--compiler-cmd",
         help="своя команда компиляции; плейсхолдеры: {compiler} {sdk} {game} {addon} {source} {content_root} {output_root}",
     )
@@ -830,6 +861,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--allow-uncompiled", action="store_true",
                         help="собрать без CSDK: VPK только с исходниками (в игре не работает, пакет DMM не собирается)")
+    parser.add_argument("--clean", action="store_true",
+                        help="собрать с нуля: удалить build/ и каталог артефактов перед стартом")
     parser.add_argument("--json", action="store_true", help="напечатать итог в JSON")
     return parser
 
@@ -837,6 +870,49 @@ def build_parser() -> argparse.ArgumentParser:
 def _validate_addon_name(name: str) -> None:
     if not re.fullmatch(r"[a-z0-9_]{2,40}", name):
         raise SystemExit("--addon-name должен состоять из строчных латинских букв, цифр и _")
+
+
+def _wipe_dir(path: Path) -> None:
+    """Удалить рабочий каталог целиком (для ``--clean``), но не корень диска."""
+    path = Path(path)
+    if not path.is_dir() or path.resolve() == Path(path.anchor):
+        return
+    shutil.rmtree(path)
+
+
+def _ensure_csdk(ctx: Context) -> None:
+    """Шаг 0: найти CSDK, а если его нет — скачать и распаковать.
+
+    Раньше на этом месте сборка останавливалась с кодом 3 и просила ставить
+    CSDK руками. Теперь всё нужное докачивается само (``tools/csdk_setup.py``);
+    отказаться можно флагом ``--no-auto-csdk``.
+    """
+    args = ctx.args
+    if args.compiler_cmd or args.allow_uncompiled:
+        return  # компилятор подменили или сборка и так «только исходники»
+    csdk_setup.set_progress_stream(sys.stderr if _LOG_TO_STDERR else sys.stdout)
+    result = csdk_setup.ensure_csdk(
+        explicit=args.csdk,
+        install_root=args.csdk_install_dir,
+        cache_dir=args.csdk_cache_dir,
+        url=args.csdk_url,
+        sha256=args.csdk_sha256,
+        allow_download=args.auto_csdk,
+        redownload=args.csdk_redownload,
+        allow_tool_install=not args.no_tool_install,
+        log=log,
+    )
+    ctx.state["csdk_status"] = result.status
+    if result.ok:
+        # Дальше все шаги работают с ним как с обычным, явно указанным CSDK.
+        args.csdk = str(result.root)
+        ctx.state["csdk_root"] = str(result.root)
+        ctx.state["csdk_compiler"] = str(result.compiler)
+        for message in result.messages:
+            ctx.note(message)
+    else:
+        for message in result.messages:
+            ctx.warn(message)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -847,6 +923,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = Path(__file__).resolve().parents[1]
     out_dir = Path(args.out).resolve() if args.out else root / "dist"
     build_dir = Path(args.build_dir).resolve() if args.build_dir else root / "build"
+
+    if args.clean:
+        log("[clean] собираю с нуля: удаляю рабочие каталоги")
+        _wipe_dir(build_dir)
+        _wipe_dir(out_dir)
 
     ctx = Context(root=root, out_dir=out_dir, build_dir=build_dir,
                   addon_name=args.addon_name, version=args.version, args=args)

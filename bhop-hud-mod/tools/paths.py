@@ -109,6 +109,24 @@ def find_game_dir(explicit: Path | None = None) -> Path | None:
     return None
 
 
+def _auto_install_root() -> Path:
+    """Каталог, в который ``tools/csdk_setup.py`` ставит CSDK по умолчанию.
+
+    Дублировать логику не хочется, но импортировать csdk_setup из paths нельзя
+    (он сам импортирует paths — получится кольцо), поэтому повторяем только
+    выбор каталога.
+    """
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidate = Path(local_app_data) / "DeadlockModding" / "Reduced_CSDK_12"
+        if not any(part in str(candidate).lower() for part in ("onedrive", "desktop", "documents")):
+            return candidate
+    system_drive = os.environ.get("SystemDrive")
+    if system_drive:
+        return Path(system_drive + "\\") / "DeadlockModding" / "Reduced_CSDK_12"
+    return Path.home() / ".local" / "share" / "deadlock-csdk" / "Reduced_CSDK_12"
+
+
 def find_csdk(explicit: Path | None = None) -> Path | None:
     """Найти CSDK с рабочим ``resourcecompiler``.
 
@@ -129,6 +147,8 @@ def find_csdk(explicit: Path | None = None) -> Path | None:
         Path("C:/Deadlock SDK"),
         Path("C:/csdk"),
         Path("D:/Deadlock SDK"),
+        # куда tools/csdk_setup.py ставит CSDK при автоустановке
+        _auto_install_root(),
         Path("/opt/csdk"),
         Path("/opt/deadlock-csdk"),
     ]

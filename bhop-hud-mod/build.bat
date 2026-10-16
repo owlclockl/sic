@@ -3,15 +3,20 @@ rem ===========================================================================
 rem  Deadlock :: Bhop Trainer HUD  --  one-click mod builder for Windows
 rem
 rem  Double-click it and it does everything by itself:
-rem    * finds Python 3.9+ (offers to install it via winget when missing),
+rem    * finds Python 3.9+ (installs it via winget when missing),
 rem    * finds the installed Deadlock (Steam registry + libraryfolders.vdf),
-rem    * finds CSDK 12 with resourcecompiler.exe,
+rem    * finds CSDK 12 with resourcecompiler.exe and, if it is missing,
+rem      downloads and unpacks Reduced CSDK 12 all by itself,
 rem    * builds the VPK and the Deadlock Mod Manager package,
 rem    * offers to stage / install / verify the mod.
 rem
 rem  Options (all optional):
 rem    build.bat --game-path "D:\Steam\steamapps\common\Deadlock"
 rem               --csdk "C:\Deadlock SDK"
+rem               --csdk-install-dir "C:\DeadlockModding"  (auto-downloaded CSDK)
+rem               --csdk-url "https://..."   (your own CSDK archive link)
+rem               --no-csdk-download         (never download, ask for the path)
+rem               --csdk-redownload          (ignore the cached archive)
 rem               --hud-xml "C:\hud.xml"   (vanilla hud.xml when the game is absent)
 rem               --version 1.2.0
 rem               --steps prepare,compile,pack,dmm,report
@@ -41,6 +46,7 @@ if not exist "%MOD_DIR%\tools\build_mod.py" goto :no_sources
 :root_ok
 set "TOOLS_DIR=%MOD_DIR%\tools"
 set "BUILD_PY=%TOOLS_DIR%\build_mod.py"
+set "SETUP_PY=%TOOLS_DIR%\csdk_setup.py"
 set "INSTALL_PY=%TOOLS_DIR%\install_dmm.py"
 set "DIST_DIR=%MOD_DIR%\dist"
 set "BUILD_DIR=%MOD_DIR%\build"
@@ -56,6 +62,12 @@ set "ARG_STEPS="
 set "ARG_OUT="
 set "ARG_VERSION="
 set "ARG_EXTRA="
+set "ARG_CSDK_URL="
+set "ARG_CSDK_DIR="
+set "DO_CSDK_REDOWNLOAD=0"
+set "NO_CSDK_DOWNLOAD=0"
+set "CSDK_ROOT_FILE=%TEMP%\deadlock-bhop-csdk-root.txt"
+if not defined TEMP set "CSDK_ROOT_FILE=%MOD_DIR%\build\csdk-root.txt"
 set "ALLOW_UNCOMPILED=0"
 set "DO_CLEAN=0"
 set "DO_TEST=0"
@@ -70,6 +82,10 @@ rem --- parse arguments -------------------------------------------------------
 if "%~1"=="" goto :args_done
 if /i "%~1"=="--game-path" set "ARG_GAME=%~2" & shift & shift & goto :parse_args
 if /i "%~1"=="--csdk" set "ARG_CSDK=%~2" & shift & shift & goto :parse_args
+if /i "%~1"=="--csdk-url" set "ARG_CSDK_URL=%~2" & shift & shift & goto :parse_args
+if /i "%~1"=="--csdk-install-dir" set "ARG_CSDK_DIR=%~2" & shift & shift & goto :parse_args
+if /i "%~1"=="--csdk-redownload" set "DO_CSDK_REDOWNLOAD=1" & shift & goto :parse_args
+if /i "%~1"=="--no-csdk-download" set "NO_CSDK_DOWNLOAD=1" & shift & goto :parse_args
 if /i "%~1"=="--hud-xml" set "ARG_HUD=%~2" & shift & shift & goto :parse_args
 if /i "%~1"=="--steps" set "ARG_STEPS=%~2" & shift & shift & goto :parse_args
 if /i "%~1"=="--out" set "ARG_OUT=%~2" & shift & shift & goto :parse_args
@@ -104,8 +120,21 @@ rem --- Python ----------------------------------------------------------------
 :python_search
 call :find_python
 if defined PY_CMD goto :python_found
-if "%NONINTERACTIVE%"=="1" goto :python_missing
+if "%NONINTERACTIVE%"=="1" goto :python_auto
 call :offer_python_install
+call :find_python
+if defined PY_CMD goto :python_found
+
+:python_auto
+rem -y means no questions, so the interpreter is installed without asking
+echo [i] -y is on: installing Python 3.12 via winget...
+where winget >nul 2>nul
+if errorlevel 1 goto :no_winget
+winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements
+if errorlevel 1 goto :winget_failed
+echo.
+echo [i] Refreshing PATH in this window and looking for Python again...
+call :refresh_path
 call :find_python
 if defined PY_CMD goto :python_found
 
@@ -138,16 +167,44 @@ rem --- CSDK ------------------------------------------------------------------
 call :resolve_csdk
 if defined CSDK_DIR goto :csdk_found
 
+if "%NO_CSDK_DOWNLOAD%"=="1" goto :csdk_menu_manual
+if "%NONINTERACTIVE%"=="1" goto :csdk_auto_try
+
 :csdk_menu
 echo.
 echo [!] CSDK 12 with resourcecompiler.exe was not found.
 echo     The Deadlock engine will not load the mod without it: it needs
 echo     compiled .vxml_c / .vcss_c, not raw .xml / .css.
 echo.
-echo     Download CSDK: %CSDK_URL%
+echo     The builder can download and unpack Reduced CSDK 12 itself:
+echo     a large archive, into a folder outside OneDrive / Desktop / Documents.
+echo.
+echo     [1] Download and install CSDK 12 automatically  (recommended)
+echo     [2] Type the CSDK path by hand (you can drag the folder here)
+echo     [3] Open the CSDK download page
+echo     [4] Build anyway, sources only (--allow-uncompiled: such a mod does
+echo         not work in game and no DMM package is produced)
+echo     [0] Quit
+echo.
+set "ANS="
+set /p "ANS=    Choice [1]: "
+if not defined ANS set "ANS=1"
+if "%ANS%"=="1" goto :csdk_auto_try
+if "%ANS%"=="2" goto :csdk_manual
+if "%ANS%"=="3" goto :csdk_open_url
+if "%ANS%"=="4" goto :csdk_allow_uncompiled
+if "%ANS%"=="0" goto :fail
+goto :csdk_menu
+
+:csdk_menu_manual
+if "%NONINTERACTIVE%"=="1" goto :csdk_missing_exit
+echo.
+echo [!] CSDK 12 with resourcecompiler.exe was not found.
+echo     Auto-download is switched off (--no-csdk-download).
+echo.
+echo     Manual page: %CSDK_URL%
 echo     (do not unpack it into OneDrive / Desktop / Documents - breaks perms)
 echo.
-if "%NONINTERACTIVE%"=="1" goto :csdk_missing_exit
 echo     [1] Type the CSDK path by hand (you can drag the folder here)
 echo     [2] Open the CSDK download page
 echo     [3] Build anyway, sources only (--allow-uncompiled: such a mod does
@@ -160,7 +217,40 @@ if "%ANS%"=="1" goto :csdk_manual
 if "%ANS%"=="2" goto :csdk_open_url
 if "%ANS%"=="3" goto :csdk_allow_uncompiled
 if "%ANS%"=="0" goto :fail
+goto :csdk_menu_manual
+
+:csdk_auto_try
+call :csdk_auto
+if defined CSDK_DIR goto :csdk_found
+if "%NONINTERACTIVE%"=="1" goto :fail
+if "%NO_CSDK_DOWNLOAD%"=="1" goto :csdk_menu_manual
 goto :csdk_menu
+
+:csdk_auto
+echo.
+echo [i] Downloading and unpacking Reduced CSDK 12 - it is a large archive,
+echo     so allow some time; a broken download is resumed, not restarted.
+echo.
+set "CSDK_DIR="
+set "CSDK_SETUP_ARGS=--root-file "%CSDK_ROOT_FILE%""
+if defined ARG_CSDK_DIR set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% --install-dir "%ARG_CSDK_DIR%""
+if defined ARG_CSDK_URL set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% --url "%ARG_CSDK_URL%""
+if "%DO_CSDK_REDOWNLOAD%"=="1" set "CSDK_SETUP_ARGS=%CSDK_SETUP_ARGS% --redownload"
+if exist "%CSDK_ROOT_FILE%" del /q "%CSDK_ROOT_FILE%" >nul 2>nul
+%PY_CMD% "%SETUP_PY%" %CSDK_SETUP_ARGS%
+set "_CSDK_TMP="
+if exist "%CSDK_ROOT_FILE%" set /p "_CSDK_TMP=" < "%CSDK_ROOT_FILE%"
+if not defined _CSDK_TMP goto :csdk_auto_failed
+call :check_csdk "%_CSDK_TMP%"
+if defined CSDK_DIR goto :eof
+
+:csdk_auto_failed
+echo.
+echo [!] Automatic CSDK setup failed. Unpack Reduced CSDK 12 by hand from
+echo     %CSDK_URL%
+echo     (not into OneDrive / Desktop / Documents) and run build.bat again:
+echo     it finds the compiler on its own. Or type the folder by hand.
+goto :eof
 
 :csdk_manual
 echo.
@@ -175,10 +265,12 @@ call :check_csdk "%ANS%"
 if defined CSDK_DIR goto :csdk_found
 echo.
 echo     No resourcecompiler.exe under that path.
+if "%NO_CSDK_DOWNLOAD%"=="1" goto :csdk_menu_manual
 goto :csdk_menu
 
 :csdk_open_url
 start "" "%CSDK_URL%"
+if "%NO_CSDK_DOWNLOAD%"=="1" goto :csdk_menu_manual
 goto :csdk_menu
 
 :csdk_allow_uncompiled
@@ -188,7 +280,7 @@ echo [i] Building sources-only artifacts (they do not work in game).
 goto :csdk_found
 
 :csdk_missing_exit
-echo [!] CSDK not found and -y forbids questions.
+echo [!] CSDK not found, auto-download is off and -y forbids questions.
 goto :fail
 
 :csdk_found
@@ -207,6 +299,11 @@ set "BUILD_ARGS="
 if defined GAME_DIR set "BUILD_ARGS=%BUILD_ARGS% --game-path "%GAME_DIR%""
 if defined ARG_HUD set "BUILD_ARGS=%BUILD_ARGS% --hud-xml "%ARG_HUD%""
 if defined CSDK_DIR set "BUILD_ARGS=%BUILD_ARGS% --csdk "%CSDK_DIR%""
+if "%NO_CSDK_DOWNLOAD%"=="1" set "BUILD_ARGS=%BUILD_ARGS% --no-auto-csdk"
+if defined ARG_CSDK_DIR set "BUILD_ARGS=%BUILD_ARGS% --csdk-install-dir "%ARG_CSDK_DIR%""
+if defined ARG_CSDK_URL set "BUILD_ARGS=%BUILD_ARGS% --csdk-url "%ARG_CSDK_URL%""
+if "%DO_CSDK_REDOWNLOAD%"=="1" set "BUILD_ARGS=%BUILD_ARGS% --csdk-redownload"
+if "%DO_CLEAN%"=="1" set "BUILD_ARGS=%BUILD_ARGS% --clean"
 if defined ARG_STEPS set "BUILD_ARGS=%BUILD_ARGS% --steps "%ARG_STEPS%""
 if defined ARG_OUT set "BUILD_ARGS=%BUILD_ARGS% --out "%ARG_OUT%""
 if defined ARG_VERSION set "BUILD_ARGS=%BUILD_ARGS% --version "%ARG_VERSION%""
@@ -238,12 +335,14 @@ echo     game\bin_cs2\win64\resourcecompiler.exe
 if "%NONINTERACTIVE%"=="1" goto :fail
 echo.
 set "ANS="
-set /p "ANS=    Build sources only (--allow-uncompiled)? [y/N]: "
-if /i "%ANS%"=="y" set "ALLOW_UNCOMPILED=1"
-if /i "%ANS%"=="y" goto :do_build
-if /i "%ANS%"=="d" set "ALLOW_UNCOMPILED=1"
-if /i "%ANS%"=="d" goto :do_build
-goto :fail
+set /p "ANS=    Download/install CSDK and retry? [Y/n/s(ources only)]: "
+if /i "%ANS%"=="s" set "ALLOW_UNCOMPILED=1"
+if /i "%ANS%"=="s" goto :do_build
+if /i "%ANS%"=="n" goto :fail
+if "%NO_CSDK_DOWNLOAD%"=="1" goto :fail
+call :csdk_auto
+if not defined CSDK_DIR goto :fail
+goto :do_build
 
 :build_ok
 echo.
@@ -637,6 +736,10 @@ echo   build.bat [options]
 echo.
 echo     --game-path PATH     Deadlock folder (or its game\, or game\citadel)
 echo     --csdk PATH          CSDK 12 folder with resourcecompiler.exe
+echo     --csdk-install-dir PATH  where to unpack an auto-downloaded CSDK
+echo     --csdk-url URL       your own CSDK archive link
+echo     --no-csdk-download   never download: ask for the folder instead
+echo     --csdk-redownload    ignore the cached archive and fetch it again
 echo     --hud-xml FILE       an already saved vanilla panorama/layout/hud.xml
 echo     --steps LIST         prepare,compile,pack,dmm,report (all by default)
 echo     --out DIR            where to put artifacts (dist by default)
@@ -644,10 +747,12 @@ echo     --version X.Y.Z      mod version
 echo     --allow-uncompiled   build without the compiler (will not work in game)
 echo     --clean              delete build\ and dist\ first
 echo     --test               run the builder's unit tests first
-echo     -y                   ask nothing (for CI)
+echo     -y                   ask nothing: install Python and CSDK itself (CI)
 echo.
 echo   Example:
 echo     build.bat --game-path "D:\Steam\steamapps\common\Deadlock" --csdk "C:\Deadlock SDK"
+echo     build.bat -y                        (everything unattended, from scratch)
+echo     build.bat --clean -y --csdk-install-dir "C:\DeadlockModding"
 echo.
 goto :done
 
