@@ -430,8 +430,14 @@ call :try_py python ""
 if defined PY_CMD goto :eof
 call :try_py python3 ""
 if defined PY_CMD goto :eof
-rem winget and the official installer drop Python here even if PATH is stale
+rem winget, PyManager and the official installer drop Python here even if PATH is stale
+if exist "%ProgramFiles%\PyManager\py.exe" call :try_py_path "%ProgramFiles%\PyManager\py.exe" "-3"
+if defined PY_CMD goto :eof
+if exist "%ProgramFiles%\PyManager\py.exe" call :try_py_path "%ProgramFiles%\PyManager\py.exe" ""
+if defined PY_CMD goto :eof
 for /d %%P in ("%LOCALAPPDATA%\Programs\Python\Python3*") do call :try_py_path "%%P\python.exe" ""
+if defined PY_CMD goto :eof
+for /d %%P in ("%ProgramFiles%\Python3*") do call :try_py_path "%%P\python.exe" ""
 if defined PY_CMD goto :eof
 if exist "%SystemDrive%\Python312\python.exe" call :try_py_path "%SystemDrive%\Python312\python.exe" ""
 if defined PY_CMD goto :eof
@@ -459,9 +465,10 @@ if /i not "%_py_full:WindowsApps=%"=="%_py_full%" goto :eof
 "%_py_full%" %~2 -c "import sys; sys.exit(0 if sys.version_info[0] == 3 and sys.version_info[1] >= 9 else 1)" >nul 2>nul
 if errorlevel 1 goto :eof
 rem no parenthesised block here: the path may contain "Program Files (x86)"
-if "%~2"=="" set "PY_CMD=%_py_full%"
+rem quote the executable path so "C:\Program Files\PyManager\py.exe" works
+if "%~2"=="" set "PY_CMD="%_py_full%""
 if "%~2"=="" goto :eof
-set "PY_CMD=%_py_full% %~2"
+set "PY_CMD="%_py_full%" %~2"
 goto :eof
 
 :offer_python_install
@@ -529,7 +536,7 @@ goto :eof
 rem --- tests -----------------------------------------------------------------
 :run_tests
 echo [i] Running the builder's unit tests...
-%PY_CMD% -m unittest discover -s "%MOD_DIR%\tests" -t "%MOD_DIR%" -p "test_*.py"
+%PY_CMD% -m unittest discover -s "%MOD_DIR%\tests" -p "test_*.py"
 if errorlevel 1 goto :tests_failed
 echo     tests passed.
 echo.
@@ -578,7 +585,7 @@ if defined GAME_DIR goto :eof
 set "_g=%_g:"=%"
 if not defined _g goto :eof
 if "%_g:~-1%"=="\" set "_g=%_g:~0,-1%"
-if exist "%_g%\game\citadel\gameinfo.gi" set "GAME_DIR=%_g%"
+if exist "%_g%\game\citadel\gameinfo.gi" for %%i in ("%_g%") do set "GAME_DIR=%%~fi"
 if defined GAME_DIR goto :eof
 if exist "%_g%\citadel\gameinfo.gi" for %%i in ("%_g%\..") do set "GAME_DIR=%%~fi"
 if defined GAME_DIR goto :eof
@@ -669,19 +676,29 @@ rem --- find CSDK -------------------------------------------------------------
 set "CSDK_DIR="
 if defined ARG_CSDK call :check_csdk "%ARG_CSDK%"
 if defined CSDK_DIR goto :eof
+if defined ARG_CSDK_DIR call :check_csdk "%ARG_CSDK_DIR%"
+if defined CSDK_DIR goto :eof
 if defined DEADLOCK_CSDK call :check_csdk "%DEADLOCK_CSDK%"
 if defined CSDK_DIR goto :eof
 if defined CSDK_ROOT call :check_csdk "%CSDK_ROOT%"
 if defined CSDK_DIR goto :eof
 if defined CSDK_PATH call :check_csdk "%CSDK_PATH%"
 if defined CSDK_DIR goto :eof
+if defined LOCALAPPDATA call :check_csdk "%LOCALAPPDATA%\DeadlockModding\Reduced_CSDK_12"
+if defined CSDK_DIR goto :eof
+if defined SystemDrive call :check_csdk "%SystemDrive%\DeadlockModding\Reduced_CSDK_12"
+if defined CSDK_DIR goto :eof
 call :check_csdk "%MOD_DIR%\csdk"
 if defined CSDK_DIR goto :eof
 call :check_csdk "%USERPROFILE%\Deadlock SDK"
 if defined CSDK_DIR goto :eof
+call :check_csdk "%USERPROFILE%\Reduced_CSDK_12"
+if defined CSDK_DIR goto :eof
 call :check_csdk "%USERPROFILE%\Desktop\Deadlock SDK"
 if defined CSDK_DIR goto :eof
 call :check_csdk "%USERPROFILE%\Downloads\Deadlock SDK"
+if defined CSDK_DIR goto :eof
+call :check_csdk "%USERPROFILE%\Downloads\Reduced_CSDK_12"
 if defined CSDK_DIR goto :eof
 call :check_csdk "%USERPROFILE%\Documents\Deadlock SDK"
 if defined CSDK_DIR goto :eof
@@ -705,9 +722,17 @@ if defined CSDK_DIR goto :eof
 if exist "%_c%\game\bin\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%"
 if defined CSDK_DIR goto :eof
 if exist "%_c%\bin\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%"
+if defined CSDK_DIR goto :eof
+if exist "%_c%\Reduced_CSDK_12\game\bin_cs2\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%\Reduced_CSDK_12"
+if defined CSDK_DIR goto :eof
+if exist "%_c%\Reduced_CSDK_12\game\bin\win64\resourcecompiler.exe" set "CSDK_DIR=%_c%\Reduced_CSDK_12"
 goto :eof
 
 :scan_csdk_drive
+call :check_csdk "%~1:\DeadlockModding\Reduced_CSDK_12"
+if defined CSDK_DIR goto :eof
+call :check_csdk "%~1:\Reduced_CSDK_12"
+if defined CSDK_DIR goto :eof
 call :check_csdk "%~1:\Deadlock SDK"
 if defined CSDK_DIR goto :eof
 call :check_csdk "%~1:\DeadlockSDK"

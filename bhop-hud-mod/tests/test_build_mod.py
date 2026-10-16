@@ -305,5 +305,36 @@ class FailureTest(PipelineCase):
         self.assertIn("addon-name", output)
 
 
+class BuildBatTest(unittest.TestCase):
+    """Инварианты build.bat: CRLF, только ASCII, кавычки вокруг пути Python."""
+
+    def setUp(self) -> None:
+        self.bat_path = _support.MOD_ROOT / "build.bat"
+        self.raw = self.bat_path.read_bytes()
+        self.text = self.raw.decode("ascii")
+
+    def test_is_pure_ascii_with_crlf_line_endings(self) -> None:
+        lines = self.raw.split(b"\n")[:-1]
+        self.assertTrue(lines)
+        bad_lines = [idx + 1 for idx, line in enumerate(lines) if not line.endswith(b"\r")]
+        self.assertEqual([], bad_lines, f"Строки без CRLF: {bad_lines}")
+
+    def test_python_path_with_spaces_is_quoted_in_py_cmd(self) -> None:
+        # На Windows PyManager ставит лаунчер в "C:\Program Files\PyManager\py.exe":
+        # без кавычек вокруг %_py_full% в PY_CMD cmd.exe обрывается на "'C:\Program' is not recognized".
+        self.assertIn('set "PY_CMD="%_py_full%""', self.text)
+        self.assertIn('set "PY_CMD="%_py_full%" %~2"', self.text)
+        self.assertNotIn('set "PY_CMD=%_py_full%"', self.text)
+        self.assertNotIn('set "PY_CMD=%_py_full% %~2"', self.text)
+
+    def test_resolve_csdk_checks_auto_install_root(self) -> None:
+        self.assertIn(r"%LOCALAPPDATA%\DeadlockModding\Reduced_CSDK_12", self.text)
+        self.assertIn(r"%SystemDrive%\DeadlockModding\Reduced_CSDK_12", self.text)
+
+    def test_run_tests_command_is_valid(self) -> None:
+        self.assertIn('unittest discover -s "%MOD_DIR%\\tests" -p "test_*.py"', self.text)
+        self.assertNotIn('-t "%MOD_DIR%"', self.text)
+
+
 if __name__ == "__main__":
     unittest.main()
