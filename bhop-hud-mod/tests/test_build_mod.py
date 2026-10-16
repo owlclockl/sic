@@ -122,6 +122,49 @@ class CompiledLayoutTest(PipelineCase):
         self.assertIn("--compiled-from", output)
 
 
+class PackWithoutCompileTest(PipelineCase):
+    """Шаг pack должен работать и без шага compile в этом же запуске."""
+
+    def test_allow_uncompiled_puts_sources_into_sources_only(self) -> None:
+        args = [
+            "--hud-xml", str(HUD_FIXTURE), "--allow-uncompiled",
+            "--steps", "prepare,pack",
+            "--out", str(self.out), "--build-dir", str(self.build),
+        ]
+        code, output = _run(args)
+        self.assertEqual(0, code, output)
+        archive = vpk.open_vpk(self.out / "sources-only" / "bhop_trainer_dir.vpk")
+        self.assertIn("panorama/styles/bhop_trainer.vcss", archive.list_entries())
+        self.assertFalse((self.out / "dmm-bundle").exists())
+
+    def test_pack_from_csdk_tree_compiled_by_hand(self) -> None:
+        csdk = self.tmp / "CSDK"
+        addon = csdk / "game" / "citadel_addons" / "bhop_trainer"
+        (addon / "panorama" / "layout").mkdir(parents=True)
+        (addon / "panorama" / "layout" / "hud.vxml_c").write_bytes(b"compiled-layout")
+        (addon / "panorama" / "styles").mkdir(parents=True)
+        (addon / "panorama" / "styles" / "bhop_trainer.vcss_c").write_bytes(b"compiled-styles")
+        args = [
+            "--hud-xml", str(HUD_FIXTURE), "--csdk", str(csdk),
+            "--steps", "prepare,pack",
+            "--out", str(self.out), "--build-dir", str(self.build),
+        ]
+        code, output = _run(args)
+        self.assertEqual(0, code, output)
+        self.assertIn("дерево CSDK", output)
+        archive = vpk.open_vpk(self.out / "bhop_trainer_dir.vpk")
+        self.assertIn("panorama/styles/bhop_trainer.vcss_c", archive.list_entries())
+        self.assertEqual(b"compiled-styles", archive.extract("panorama/styles/bhop_trainer.vcss_c"))
+
+    def test_pack_without_anything_is_a_clear_error(self) -> None:
+        code, output = _run([
+            "--hud-xml", str(HUD_FIXTURE), "--steps", "prepare,pack",
+            "--out", str(self.out), "--build-dir", str(self.build),
+        ])
+        self.assertEqual(2, code, output)
+        self.assertIn("--compiled-from", output)
+
+
 class FullPipelineTest(PipelineCase):
     def test_builds_vpk_bundle_and_report(self) -> None:
         code, output = _run(self.base_args())

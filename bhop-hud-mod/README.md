@@ -50,6 +50,7 @@ python3 tools/install_dmm.py verify
 | Игра есть, CSDK нет (проверить пайплайн, без компиляции) | `… --game-path … --allow-uncompiled` |
 | Только подготовить дерево аддона + патч `hud.xml` | `… --steps prepare` |
 | Компилятор кладёт результат в нестандартное место | `… --compiled-from /путь/к/дереву` |
+| Упаковать дерево, скомпилированное вручную в CSDK | `… --csdk PATH --steps prepare,pack` |
 | Итог в JSON (для CI) | `… --json` (логи уходят в stderr, в stdout — только JSON) |
 | Другой номер/название сборки | `… --version 1.2.0 --title "Bhop Trainer (test)" --addon-name bhopt_test` |
 
@@ -223,8 +224,11 @@ python3 -m unittest discover -s tests -p "test_*.py"
    Ожидаемые результаты: `game/citadel_addons/bhop_trainer/panorama/layout/hud.vxml_c`
    и `panorama/styles/bhop_trainer.vcss_c`.
 7. **Упаковать**: правый клик по аддону → *Create VPK*, либо CS2 Workshop Manager намеренно
-   уронить на Submit (VPK появится в `game/citadel_addons`). Вариант без Windows —
-   `python3 tools/build_mod.py --steps pack` по уже скомпилированному дереву.
+   уронить на Submit (VPK появится в `game/citadel_addons`). Вариант без Windows — взять
+   скомпилированное дерево и упаковать его сборщиком:
+   `python3 tools/build_mod.py --csdk <CSDK> --steps prepare,pack`; либо просто скопировать
+   `game/citadel_addons/<addon>` в `build/game/citadel_addons/<addon>` и запустить
+   `… --steps pack` без `--allow-uncompiled`.
 8. **Поставить в игру**: положить VPK в `Deadlock/game/citadel/addons` под именем
    `pakNN_dir.vpk` (номер 01–99), `gameinfo.gi` должен содержать `Game citadel/addons`
    в `SearchPaths`. Полностью выйти из игры и запустить заново. Проще —

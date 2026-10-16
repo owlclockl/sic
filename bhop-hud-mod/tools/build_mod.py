@@ -499,12 +499,53 @@ def _copy_tree(source: Path, destination: Path) -> None:
         shutil.copy2(path, target)
 
 
+def _pack_source_tree(ctx: Context) -> Path:
+    """Найти дерево, которое надо упаковать.
+
+    Обычно это стадия ``build/game/...`` после шага compile. Но шаги можно
+    запускать и по отдельности, поэтому проверяем ещё ``--compiled-from`` и
+    дерево CSDK — так работает сборка VPK из того, что скомпилировано вручную
+    в интерфейсе CSDK.
+    """
+    candidates: list[tuple[Path, str]] = [(ctx.output_root, "стадия сборки")]
+    if ctx.args.compiled_from:
+        candidates.append((Path(ctx.args.compiled_from).expanduser().resolve(), "--compiled-from"))
+    # Явно указанный --csdk доверяем как есть: упаковать дерево, скомпилированное
+    # в интерфейсе CSDK, можно и без resourcecompiler.exe на этой машине.
+    csdk = (Path(ctx.args.csdk).expanduser().resolve() if ctx.args.csdk
+            else paths_mod.find_csdk(None))
+    if csdk is not None:
+        candidates.append((csdk / "game" / "citadel_addons" / ctx.addon_name, "дерево CSDK"))
+    for root, label in candidates:
+        if root.is_dir() and any(path.is_file() for path in root.rglob("*")):
+            if label != "стадия сборки":
+                ctx.note(f"ресурсы взяты из «{label}»: {_rel(root, ctx.root)}")
+            if not (root / "panorama").is_dir():
+                ctx.warn(f"в «{label}» нет каталога panorama — проверь, что это дерево аддона")
+            ctx.state.setdefault("packed_from", str(root))
+            return root
+
+    if ctx.args.allow_uncompiled:
+        # Режим «только исходники»: пакуем дерево content как есть. В игре это
+        # не заработает (движку нужны *_c), но пайплайн и упаковку проверить можно.
+        ctx.state["uncompiled"] = True
+        ctx.warn(
+            "нет скомпилированного дерева: собираю VPK «только исходники».\n"
+            "  Движок Deadlock НЕ загружает сырые .xml/.css из аддона — такой VPK в игре не работает\n"
+            "  и пакет для Deadlock Mod Manager в этом режиме не собирается."
+        )
+        return ctx.content_root
+
+    raise SystemExit(
+        "нет дерева для упаковки: выполни шаг compile, укажи --compiled-from или --csdk,\n"
+        "  либо собери пайплайн без компиляции: --allow-uncompiled (в игре не заработает)"
+    )
+
+
 def step_pack(ctx: Context) -> None:
     """Упаковать ресурсы в VPK и вшить метаданные."""
     log("[3/4] pack — VPK + метаданные")
-    tree_root = ctx.output_root
-    if not tree_root.is_dir():
-        raise SystemExit("нет дерева для упаковки: сначала выполни prepare/compile")
+    tree_root = _pack_source_tree(ctx)
 
     payloads: dict[str, bytes] = {}
     for path in sorted(tree_root.rglob("*")):
