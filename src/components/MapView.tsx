@@ -105,7 +105,11 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
     pinchScale?: number;
     pinchMid?: { x: number; y: number };
     moved: boolean;
+    touch: boolean;
+    started: boolean;
+    startCell: { col: number; row: number } | null;
   } | null>(null);
+  const lastPointerTypeRef = useRef<string>('mouse');
 
   const fitScale = useMemo(() => {
     if (!viewport.w || !viewport.h) return 1;
@@ -246,23 +250,35 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
     return cells;
   };
 
+  const beginStroke = () => {
+    const g = gestureRef.current;
+    if (!g || g.started) return;
+    g.started = true;
+    onStrokeStart();
+  };
+
   const paintAt = (px: number, py: number) => {
     const g = gestureRef.current;
     if (!g || g.mode !== 'paint') return;
     const cell = cellFromScreen(px, py, false);
     if (!cell) return;
     if (g.lastCell && g.lastCell.col === cell.col && g.lastCell.row === cell.row) return;
+    beginStroke();
     g.lastCell = cell;
     onPaint(stampCells(cell, brushSize), g.paintValue);
   };
 
   const handlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button === 2) e.preventDefault();
+    const isTouch = e.pointerType === 'touch';
+    lastPointerTypeRef.current = e.pointerType || 'mouse';
     const point = localPoint(e.clientX, e.clientY);
     pointersRef.current.set(e.pointerId, point);
     e.currentTarget.setPointerCapture(e.pointerId);
 
     if (pointersRef.current.size === 2) {
+      // Второй палец отменяет начатый мазок и превращает жест в зум.
+      if (gestureRef.current?.mode === 'paint' && gestureRef.current.started) onStrokeEnd();
       const pts = [...pointersRef.current.values()];
       const dx = pts[0].x - pts[1].x;
       const dy = pts[0].y - pts[1].y;
@@ -276,6 +292,9 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
         pinchScale: viewRef.current.scale,
         pinchMid: { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 },
         moved: false,
+        touch: isTouch,
+        started: false,
+        startCell: null,
       };
       setPainting(false);
       setDragging(false);
@@ -291,6 +310,9 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
         startView: viewRef.current,
         startPointer: point,
         moved: false,
+        touch: isTouch,
+        started: false,
+        startCell: null,
       };
       setDragging(true);
       return;
@@ -304,10 +326,14 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
       startView: viewRef.current,
       startPointer: point,
       moved: false,
+      touch: isTouch,
+      started: false,
+      startCell: cellFromScreen(point.x, point.y, false),
     };
     setPainting(true);
-    onStrokeStart();
-    paintAt(point.x, point.y);
+    // На тач-экране не закрашиваем сразу: вдруг это начало пинча.
+    // Одиночное касание открывает клетку на отпускании, движение — рисует.
+    if (!isTouch) paintAt(point.x, point.y);
   };
 
   const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -355,6 +381,13 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
     }
 
     setHover(cellFromScreen(point.x, point.y, true));
+
+    if (g.touch && !g.moved) {
+      const dx = point.x - g.startPointer.x;
+      const dy = point.y - g.startPointer.y;
+      if (Math.hypot(dx, dy) < 4) return;
+      g.moved = true;
+    }
     paintAt(point.x, point.y);
   };
 
@@ -376,11 +409,19 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
         startView: viewRef.current,
         startPointer: point,
         moved: false,
+        touch: true,
+        started: false,
+        startCell: null,
       };
       return;
     }
     if (g.mode === 'paint') {
-      onStrokeEnd();
+      // Тап без движения — открыть (или скрыть) одну клетку.
+      if (g.touch && !g.moved && g.startCell && !g.started) {
+        beginStroke();
+        onPaint(stampCells(g.startCell, brushSize), g.paintValue);
+      }
+      if (g.started) onStrokeEnd();
       setPainting(false);
     }
     if (g.mode === 'pan') setDragging(false);
@@ -519,6 +560,8 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
       onPointerCancel={endGesture}
       onPointerLeave={() => setHover(null)}
       onDoubleClick={(e) => {
+        // На тач-экранах зум делается пинчем, двойной тап только мешает рисовать.
+        if (lastPointerTypeRef.current === 'touch') return;
         const p = localPoint(e.clientX, e.clientY);
         zoomAt(p.x, p.y, viewRef.current.scale * 1.6);
       }}

@@ -31,6 +31,11 @@ body,
   margin: 0;
 }
 
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -38,6 +43,7 @@ body {
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 button,
@@ -51,6 +57,7 @@ button {
   cursor: pointer;
   border: none;
   background: none;
+  touch-action: manipulation;
 }
 
 button:disabled {
@@ -61,6 +68,7 @@ button:disabled {
 .app {
   display: flex;
   flex-direction: column;
+  height: 100vh;
   height: 100dvh;
   min-height: 0;
   background:
@@ -479,6 +487,8 @@ button:disabled {
   overflow: hidden;
   touch-action: none;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .map-stage {
@@ -980,6 +990,20 @@ input[type='range']::-moz-range-thumb {
   display: none;
 }
 
+/* ── Мобильные элементы (скрыты на десктопе) ───────────────── */
+
+.scrim {
+  display: none;
+}
+
+.dock {
+  display: none;
+}
+
+.mobile-hint {
+  display: none;
+}
+
 /* ── Адаптив ────────────────────────────────────────────────── */
 
 @media (max-width: 1180px) {
@@ -1001,120 +1025,406 @@ input[type='range']::-moz-range-thumb {
     display: inline-grid;
   }
 
-  .brand-name {
-    font-size: 14px;
-  }
-
-  .brand-sub {
-    display: none;
+  /* Нижняя панель занимает своё место в потоке: карта не прячется под ней */
+  .layout {
+    flex-direction: column;
   }
 
   .topbar {
-    gap: 10px;
-    padding: 0 8px;
+    height: auto;
+    min-height: 56px;
+    gap: 8px;
+    padding: calc(6px + env(safe-area-inset-top, 0px)) 10px 6px;
+    background: rgba(7, 12, 20, 0.94);
   }
 
-  .toolbar {
-    margin: 0;
+  .brand {
+    gap: 8px;
     flex: 1 1 auto;
-    justify-content: flex-start;
-  }
-
-  .zoom-group {
-    display: none;
-  }
-
-  .sidebar-shell,
-  .settings-shell {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    z-index: 35;
-    height: 100%;
-    box-shadow: var(--shadow);
-  }
-
-  .sidebar-shell {
-    left: 0;
-    flex-basis: 272px;
-    width: 272px;
-    border-right: 1px solid var(--line);
-    background: #0a111c;
-    transform: translateX(0);
-    transition: transform 0.24s ease;
-  }
-
-  .sidebar-shell:not(.is-open) {
-    flex-basis: 272px;
-    width: 272px;
-    border-right: 1px solid var(--line);
-    transform: translateX(-100%);
-  }
-
-  .settings-shell {
-    right: 0;
-    flex-basis: 336px;
-    width: 336px;
-    border-left: 1px solid var(--line);
-    background: #0a111c;
-    transform: translateX(0);
-    transition: transform 0.24s ease;
-  }
-
-  .settings-shell:not(.is-open) {
-    flex-basis: 336px;
-    width: 336px;
-    border-left: 1px solid var(--line);
-    transform: translateX(100%);
-  }
-
-  .hud {
-    left: 10px;
-    right: 10px;
-    bottom: 10px;
-    max-width: none;
-  }
-
-  .hud-hint {
-    display: none;
-  }
-}
-
-@media (max-width: 720px) {
-  .topbar {
-    height: 56px;
   }
 
   .brand-mark {
     width: 30px;
     height: 30px;
+    font-size: 15px;
   }
 
-  .toolbar {
-    gap: 6px;
+  .brand-name {
+    font-size: 14px;
   }
 
-  .brush-group {
+  .brand-sub {
+    display: block;
+    max-width: 52vw;
+    font-size: 11px;
+  }
+
+  /* На телефоне инструменты живут в нижней панели */
+  .toolbar,
+  .settings-toggle {
     display: none;
   }
 
-  .settings-shell,
-  .settings-shell:not(.is-open) {
-    width: min(336px, 92vw);
-    flex-basis: min(336px, 92vw);
+  .icon-btn {
+    width: 40px;
+    height: 40px;
   }
 
-  .settings {
-    width: min(336px, 92vw);
+  /* ── Шторки ── */
+  .scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 40;
+    background: rgba(4, 8, 14, 0.55);
+    backdrop-filter: blur(2px);
+    animation: scrim-in 0.2s ease;
+  }
+
+  @keyframes scrim-in {
+    from {
+      opacity: 0;
+    }
   }
 
   .sidebar-shell,
   .sidebar-shell:not(.is-open) {
-    width: min(272px, 86vw);
-    flex-basis: min(272px, 86vw);
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(300px, 86vw);
+    flex-basis: min(300px, 86vw);
+    height: 100%;
+    z-index: 45;
+    border-right: 1px solid var(--line);
+    border-radius: 0 18px 18px 0;
+    background: #0a111c;
+    box-shadow: var(--shadow);
+    transform: translateX(-100%);
+    transition: transform 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .sidebar-shell.is-open {
+    transform: translateX(0);
   }
 
   .sidebar {
-    width: min(272px, 86vw);
+    width: min(300px, 86vw);
+  }
+
+  .sidebar-head {
+    padding-top: 18px;
+  }
+
+  .settings-shell,
+  .settings-shell:not(.is-open) {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    width: 100%;
+    flex-basis: auto;
+    height: min(72vh, 620px);
+    height: min(72dvh, 620px);
+    z-index: 45;
+    border-left: none;
+    border-top: 1px solid var(--line-strong);
+    border-radius: 18px 18px 0 0;
+    background: #0a111c;
+    box-shadow: 0 -20px 44px rgba(0, 0, 0, 0.55);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    transform: translateY(100%);
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .settings-shell.is-open {
+    transform: translateY(0);
+  }
+
+  .settings {
+    width: 100%;
+    height: auto;
+  }
+
+  .settings-head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    padding-top: 22px;
+    background: #0a111c;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .settings-head::before {
+    content: '';
+    position: absolute;
+    top: 8px;
+    left: 50%;
+    width: 40px;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.2);
+    transform: translateX(-50%);
+  }
+
+  .settings-head .icon-btn {
+    margin-left: auto;
+  }
+
+  /* Крупнее поля в шторке — палец не промахивается */
+  .settings-section {
+    padding: 16px;
+    gap: 12px;
+  }
+
+  .text-input {
+    padding: 12px;
+    font-size: 16px; /* без автозума iOS */
+  }
+
+  .chip {
+    padding: 8px 12px;
+    font-size: 12.5px;
+  }
+
+  .btn {
+    padding: 12px;
+    font-size: 13.5px;
+  }
+
+  .segmented button {
+    padding: 10px 8px;
+  }
+
+  input[type='range'] {
+    height: 34px;
+  }
+
+  input[type='range']::-webkit-slider-thumb {
+    width: 22px;
+    height: 22px;
+    margin-top: -9px;
+  }
+
+  input[type='range']::-moz-range-thumb {
+    width: 20px;
+    height: 20px;
+  }
+
+  .number-box {
+    padding: 8px 10px;
+  }
+
+  .number-box input {
+    width: 58px;
+    font-size: 16px;
+  }
+
+  .hud {
+    display: none;
+  }
+
+  /* ── Нижняя панель ── */
+  .dock {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    position: relative;
+    flex: 0 0 auto;
+    width: 100%;
+    z-index: 35;
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+    background: rgba(8, 13, 22, 0.93);
+    backdrop-filter: blur(18px);
+    border-top: 1px solid var(--line);
+    box-shadow: 0 -14px 34px rgba(0, 0, 0, 0.45);
+  }
+
+  .dock-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 2px;
+  }
+
+  .dock-bar {
+    flex: 1 1 auto;
+    height: 5px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+    overflow: hidden;
+  }
+
+  .dock-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(126, 224, 195, 0.6), var(--accent));
+    box-shadow: 0 0 10px rgba(126, 224, 195, 0.5);
+    transition: width 0.18s ease;
+  }
+
+  .dock-percent {
+    font-size: 12px;
+    color: var(--accent);
+    min-width: 34px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dock-count {
+    font-size: 11px;
+    color: var(--muted-2);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dock-tools {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+  }
+
+  .dock-tools button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    height: 48px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--muted);
+    font-size: 17px;
+    line-height: 1;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .dock-tools button span {
+    font-size: 11px;
+    line-height: 1.2;
+  }
+
+  .dock-tools button.is-active {
+    background: var(--accent-soft);
+    border-color: var(--accent-line);
+    color: var(--accent);
+  }
+
+  .dock-actions {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 4px;
+  }
+
+  .dock-actions button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-height: 42px;
+    padding: 6px 2px;
+    border-radius: 10px;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.1;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .dock-actions button b {
+    font-weight: 600;
+    font-size: 13px;
+  }
+
+  .dock-actions button span {
+    font-size: 10px;
+    color: var(--muted-2);
+  }
+
+  .dock-actions button.is-active {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+
+  .dock-actions button.is-active span {
+    color: var(--accent);
+  }
+
+  .mobile-hint {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid var(--accent-line);
+    background: rgba(126, 224, 195, 0.08);
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--muted);
+  }
+
+  .mobile-hint strong {
+    display: block;
+    margin-bottom: 2px;
+    font-size: 12px;
+    color: var(--text);
+  }
+
+  .mobile-hint button {
+    flex: 0 0 auto;
+    padding: 9px 12px;
+    border-radius: 9px;
+    background: var(--accent);
+    color: #062018;
+    font-weight: 600;
+    font-size: 11.5px;
+  }
+}
+
+@media (max-width: 420px) {
+  .brand-sub {
+    max-width: 42vw;
+  }
+
+  .dock-count {
+    display: none;
+  }
+
+  .dock-tools button {
+    height: 46px;
+  }
+
+  .dock-actions button span {
+    font-size: 9.5px;
+  }
+}
+
+/* Ландшафт на телефоне: панель компактнее */
+@media (max-width: 980px) and (max-height: 500px) {
+  .dock-progress {
+    display: none;
+  }
+
+  .dock-actions button span {
+    display: none;
+  }
+
+  .dock-tools button {
+    height: 42px;
+  }
+
+  .settings-shell,
+  .settings-shell:not(.is-open) {
+    height: 100%;
+    border-radius: 0;
+  }
+
+  .sidebar-shell,
+  .sidebar-shell:not(.is-open) {
+    border-radius: 0;
   }
 }

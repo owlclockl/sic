@@ -33,6 +33,8 @@ interface Snapshot {
 }
 
 const DEMO_GRID: GridConfig = { ...DEFAULT_GRID, tileSize: 64 };
+const BRUSH_SIZES = [1, 2, 3, 5];
+const MOBILE_HINT_KEY = 'reveal-atlas/mobile-hint';
 
 let demoImageCache: ProjectImage | null = null;
 function demoImage(): ProjectImage {
@@ -77,6 +79,14 @@ export default function App() {
   const [toast, setToast] = useState<Toast>(null);
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [mobileHint, setMobileHint] = useState(() => {
+    if (typeof window === 'undefined' || window.innerWidth > 980) return false;
+    try {
+      return localStorage.getItem(MOBILE_HINT_KEY) !== 'off';
+    } catch {
+      return true;
+    }
+  });
 
   const mapRef = useRef<MapHandle | null>(null);
   const undoRef = useRef<Snapshot[]>([]);
@@ -98,6 +108,37 @@ export default function App() {
 
   const showToast = useCallback((kind: 'info' | 'error', text: string) => {
     setToast({ kind, text });
+  }, []);
+
+  const toggleDrawer = useCallback(
+    (which: 'worlds' | 'settings') => {
+      if (which === 'worlds') {
+        const next = !sidebarOpen;
+        setSidebarOpen(next);
+        if (next) setSettingsOpen(false);
+      } else {
+        const next = !settingsOpen;
+        setSettingsOpen(next);
+        if (next) setSidebarOpen(false);
+      }
+    },
+    [sidebarOpen, settingsOpen],
+  );
+
+  const cycleBrush = useCallback(() => {
+    setBrushSize((current) => {
+      const idx = BRUSH_SIZES.indexOf(current);
+      return BRUSH_SIZES[(idx + 1) % BRUSH_SIZES.length];
+    });
+  }, []);
+
+  const dismissMobileHint = useCallback(() => {
+    setMobileHint(false);
+    try {
+      localStorage.setItem(MOBILE_HINT_KEY, 'off');
+    } catch {
+      /* приватный режим — просто скрываем подсказку */
+    }
   }, []);
 
   useEffect(() => {
@@ -201,6 +242,7 @@ export default function App() {
   }, [grid]);
 
   const handlePaint = useCallback((cells: Array<[number, number]>, value: boolean) => {
+    if (mobileHint) dismissMobileHint();
     setRevealed((prev) => {
       let changed = false;
       let bits: Uint8Array | null = null;
@@ -214,7 +256,7 @@ export default function App() {
       }
       return changed && bits ? { cols: prev.cols, rows: prev.rows, bits } : prev;
     });
-  }, []);
+  }, [mobileHint, dismissMobileHint]);
 
   const handleStrokeStart = useCallback(() => {
     pushUndo();
@@ -454,8 +496,9 @@ export default function App() {
       <header className="topbar">
         <button
           className="icon-btn mobile-only"
-          onClick={() => setSidebarOpen((v) => !v)}
+          onClick={() => toggleDrawer('worlds')}
           aria-label="Миры"
+          aria-expanded={sidebarOpen}
         >
           ☰
         </button>
@@ -533,7 +576,7 @@ export default function App() {
 
         <button
           className={`icon-btn settings-toggle${settingsOpen ? ' is-active' : ''}`}
-          onClick={() => setSettingsOpen((v) => !v)}
+          onClick={() => toggleDrawer('settings')}
           aria-label="Настройки"
           title="Настройки сетки и мира"
         >
@@ -542,6 +585,16 @@ export default function App() {
       </header>
 
       <div className="layout">
+        {(sidebarOpen || settingsOpen) && (
+          <div
+            className="scrim"
+            onClick={() => {
+              setSidebarOpen(false);
+              setSettingsOpen(false);
+            }}
+          />
+        )}
+
         <div className={sidebarOpen ? 'sidebar-shell is-open' : 'sidebar-shell'}>
           <Sidebar
             projects={projects}
@@ -640,6 +693,91 @@ export default function App() {
             />
           )}
         </div>
+
+        <nav className="dock" aria-label="Панель инструментов">
+          {mobileHint && (
+            <div className="mobile-hint">
+              <div>
+                <strong>Как управлять</strong>
+                Один палец — открывать клетки, два — зум и панорама.
+                «Рука» — перемещение по карте.
+              </div>
+              <button onClick={dismissMobileHint}>Понятно</button>
+            </div>
+          )}
+
+          <div className="dock-progress">
+            <div className="dock-bar">
+              <div className="dock-bar-fill" style={{ width: `${progress * 100}%` }} />
+            </div>
+            <span className="dock-percent">
+              {(progress * 100).toFixed(progress > 0 && progress < 0.1 ? 1 : 0)}%
+            </span>
+            <span className="dock-count">
+              {revealedCount.toLocaleString('ru-RU')} / {totalCells.toLocaleString('ru-RU')}
+            </span>
+          </div>
+
+          <div className="dock-tools" role="group" aria-label="Инструмент">
+            <button
+              className={tool === 'reveal' ? 'is-active' : ''}
+              onClick={() => setTool('reveal')}
+              aria-pressed={tool === 'reveal'}
+            >
+              <b aria-hidden>✦</b>
+              <span>Открыть</span>
+            </button>
+            <button
+              className={tool === 'hide' ? 'is-active' : ''}
+              onClick={() => setTool('hide')}
+              aria-pressed={tool === 'hide'}
+            >
+              <b aria-hidden>◒</b>
+              <span>Скрыть</span>
+            </button>
+            <button
+              className={tool === 'pan' ? 'is-active' : ''}
+              onClick={() => setTool('pan')}
+              aria-pressed={tool === 'pan'}
+            >
+              <b aria-hidden>✥</b>
+              <span>Рука</span>
+            </button>
+          </div>
+
+          <div className="dock-actions">
+            <button onClick={cycleBrush} title="Размер кисти">
+              <b>{brushSize}×{brushSize}</b>
+              <span>Кисть</span>
+            </button>
+            <button onClick={handleUndo} disabled={undoCount === 0} title="Отменить мазок">
+              <b aria-hidden>↶</b>
+              <span>Отмена</span>
+            </button>
+            <button
+              className={showGrid ? 'is-active' : ''}
+              onClick={() => setShowGrid((v) => !v)}
+              aria-pressed={showGrid}
+              title="Показать сетку"
+            >
+              <b aria-hidden>▦</b>
+              <span>Сетка</span>
+            </button>
+            <button onClick={() => mapRef.current?.fit()} title="Вписать мир">
+              <b aria-hidden>⤢</b>
+              <span>Вписать</span>
+            </button>
+            <button
+              className={settingsOpen ? 'is-active' : ''}
+              onClick={() => toggleDrawer('settings')}
+              aria-pressed={settingsOpen}
+              title="Настройки"
+            >
+              <b aria-hidden>⚙</b>
+              <span>Настройки</span>
+            </button>
+          </div>
+        </nav>
       </div>
 
       {toast && <div className={`toast toast-${toast.kind}`}>{toast.text}</div>}
