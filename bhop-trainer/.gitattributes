@@ -1,2 +1,0 @@
-# Keep the double-click Windows launcher runnable from cmd.exe.
-*.bat text eol=crlf

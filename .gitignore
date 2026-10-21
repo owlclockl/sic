@@ -1,28 +1,8 @@
-# Артефакты сборки мода Deadlock :: Bhop Trainer
-build/
+node_modules/
 dist/
-
-# Журналы сборщика (build.bat пишет их в logs/ рядом с модом):
-# их и отправляют при разборе поломки, в репозитории им не место.
-bhop-hud-mod/logs/
-
-# Python: кэш и локальные окружения
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-
-# Редакторы и ОС
+dist-ssr/
+*.local
 .DS_Store
 Thumbs.db
-*.swp
-
-# Локальные копии игровых файлов (в т.ч. ванильный hud.xml из паков Deadlock) —
-# в репозитории им не место: это ассеты Valve.
-bhop-hud-mod/build/vanilla/
-*.hud.xml.local
-
-# CSDK 12, скачанный и распакованный автоматически (гигабайты — не в репозитории)
-csdk/
-csdk-cache/
-*.part
+.vite/
+npm-debug.log*
