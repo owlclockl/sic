@@ -1660,8 +1660,9 @@ input[type='range']::-moz-range-thumb {
 
   .dock-actions {
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    gap: 4px;
+    /* 6 кнопок: Кисть, Отмена, Сетка, Вписать, Онлайн, Настройки */
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 3px;
   }
 
   .dock-actions button {
@@ -1742,7 +1743,8 @@ input[type='range']::-moz-range-thumb {
   }
 
   .dock-actions button span {
-    font-size: 9.5px;
+    font-size: 9px;
+    letter-spacing: -0.01em;
   }
 }
 

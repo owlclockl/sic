@@ -24,11 +24,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
 function parseArgs(argv) {
-  const options = { port: Number(process.env.PORT) || 8080, host: '0.0.0.0', data: null };
+  const options = { port: Number(process.env.PORT) || 8080, host: '0.0.0.0', data: null, tunnel: true };
   for (let i = 2; i < argv.length; i++) {
     if (argv[i] === '--port' || argv[i] === '-p') options.port = Number(argv[++i]);
     else if (argv[i] === '--host') options.host = argv[++i];
     else if (argv[i] === '--data' || argv[i] === '-d') options.data = argv[++i];
+    else if (argv[i] === '--no-tunnel') options.tunnel = false;
+    else if (argv[i] === '--tunnel') options.tunnel = true;
   }
   return options;
 }
@@ -55,9 +57,14 @@ httpServer.listen(args.port, args.host, () => {
   console.log('');
 });
 
-/** Ищ cloudflared в PATH и в типичных местах установки. */
+/** Ищ cloudflared: в .tools/ проекта, в PATH и в типичных местах установки. */
 function findCloudflared() {
-  const candidates = [];
+  const exe = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
+  const candidates = [
+    path.join(ROOT, '.tools', exe),
+    path.join(ROOT, 'bin', exe),
+    path.join(os.homedir(), '.cloudflared', exe),
+  ];
   const localAppData = process.env.LOCALAPPDATA;
   const programFiles = process.env.ProgramFiles;
   if (programFiles) candidates.push(path.join(programFiles, 'cloudflared', 'cloudflared.exe'));
@@ -68,9 +75,8 @@ function findCloudflared() {
   candidates.push('/usr/local/bin/cloudflared', '/usr/bin/cloudflared', '/opt/homebrew/bin/cloudflared');
 
   const paths = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
-  for (const dir of paths) {
-    candidates.push(path.join(dir, process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared'));
-  }
+  for (const dir of paths) candidates.push(path.join(dir, exe));
+
   for (const candidate of candidates) {
     try {
       if (candidate && fs.existsSync(candidate)) return candidate;
@@ -81,7 +87,7 @@ function findCloudflared() {
   return null;
 }
 
-const cloudflared = findCloudflared();
+const cloudflared = args.tunnel ? findCloudflared() : null;
 let tunnel = null;
 
 if (cloudflared) {
@@ -90,20 +96,39 @@ if (cloudflared) {
   tunnel = spawn(cloudflared, ['tunnel', '--url', `http://127.0.0.1:${args.port}`, '--no-autoupdate'], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  // Настоящий адрес туннеля печатается в рамке; api.trycloudflare.com — это
+  // служебный endpoint, его показывать нельзя.
+  const TUNNEL_URL = /https:\/(?!api\.)[a-z0-9-]+\.trycloudflare\.com/;
+  let announced = false;
   const onLine = (line) => {
     const text = String(line);
-    const match = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/.exec(text);
-    if (match) {
-      console.log('  ┌──────────────────────────────────────────────────────────────');
+    const match = TUNNEL_URL.exec(text);
+    if (match && !announced) {
+      announced = true;
+      console.log('');
+      console.log('  ┌──────────────────────────────────────────────────────────────┐');
       console.log(`  │  ПУБЛИЧНЫЙ АДРЕС: ${match[0]}`);
-      console.log('  │  Отправьте его друзьям: в приложении «Онлайн» → «Сервер».');
-      console.log('  └──────────────────────────────────────────────────────────────\n');
+      console.log('  │  Откройте его на телефоне — приложение и онлайн уже работают.  │');
+      console.log('  │  «Онлайн» → «+ Создать комнату» → отправьте другу код.         │');
+      console.log('  └──────────────────────────────────────────────────────────────┘');
+      console.log('');
     }
   };
   tunnel.stdout.on('data', onLine);
   tunnel.stderr.on('data', onLine);
   tunnel.on('exit', (code) => {
-    console.log(`\n  Туннель закрыт (код ${code}). Сервер продолжает работать локально.\n`);
+    if (announced) {
+      console.log(`\n  Туннель закрыт (код ${code}). Сервер продолжает работать локально.\n`);
+      return;
+    }
+    console.log(`\n  Туннель не поднялся (код ${code}).`);
+    console.log('  Самые частые причины:');
+    console.log('   · нет доступа к api.trycloudflare.com (фаервол, корпоративная сеть, песочница);');
+    console.log('   · cloudflared не смог выйти в интернет.');
+    console.log('  Что делать: запустите туннель там, где интернет открыт — свой ПК');
+    console.log('  (npm run online:tunnel) или notebook deploy/RevealAtlas-Online-Colab.ipynb');
+    console.log('  из Google Диска: там cloudflared работает на стороне Google.');
+    console.log('  А пока сервер доступен локально — адрес выше.\n');
   });
 } else {
   console.log('  cloudflared не найден — сервер доступен только в локальной сети.');

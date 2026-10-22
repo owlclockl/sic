@@ -13,6 +13,7 @@
     "online": "node server/index.mjs",
     "start": "node server/index.mjs",
     "online:tunnel": "node scripts/online-tunnel.mjs",
+    "cloudflared": "node scripts/install-cloudflared.mjs",
     "test:online": "node scripts/online-selftest.mjs && node scripts/online-client-selftest.mjs",
     "test:online:server": "node scripts/online-selftest.mjs",
     "test:online:client": "node scripts/online-client-selftest.mjs",

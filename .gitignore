@@ -9,3 +9,7 @@ npm-debug.log*
 
 # данные онлайн-сервера (комнаты и картинки миров)
 data/
+
+# cloudflared (скачивается скриптом scripts/install-cloudflared.mjs)
+.tools/
+.tools-tmp-*/
