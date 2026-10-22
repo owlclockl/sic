@@ -160,15 +160,28 @@ async function loadDesktopState(): Promise<StoredState | null> {
   return parseHydratedProjects(raw);
 }
 
-function buildCompactDesktopJson(state: StoredState, allowInlineFallback: boolean): string {
+interface CompactJson {
+  body: string;
+  /** false — в состоянии есть мир, картинка которого ещё не на сервере. */
+  safe: boolean;
+}
+
+function buildCompactDesktopJson(state: StoredState, allowInlineFallback: boolean): CompactJson {
+  let safe = true;
   const compactProjects = state.projects.map((p) => {
     const key = safeBlobKey(p.id);
     const alreadyUploaded = uploadedBlobs.get(key) === p.image.dataUrl;
-    const dataUrl = alreadyUploaded
-      ? `${BLOB_PREFIX}${key}`
-      : allowInlineFallback && p.image.dataUrl.length < 45000
-        ? p.image.dataUrl
-        : `${BLOB_PREFIX}${key}`;
+    let dataUrl: string;
+    if (alreadyUploaded) {
+      dataUrl = `${BLOB_PREFIX}${key}`;
+    } else if (allowInlineFallback && p.image.dataUrl.length < 45000) {
+      dataUrl = p.image.dataUrl;
+    } else {
+      // Ссылаться на блоб, которого нет на сервере, нельзя: после перезапуска
+      // мир бы просто исчез. Такую состояние не отправляем.
+      dataUrl = `${BLOB_PREFIX}${key}`;
+      safe = false;
+    }
     return {
       ...p,
       image: {
@@ -177,11 +190,14 @@ function buildCompactDesktopJson(state: StoredState, allowInlineFallback: boolea
       },
     };
   });
-  return JSON.stringify({
-    version: 1,
-    activeId: state.activeId,
-    projects: compactProjects,
-  });
+  return {
+    body: JSON.stringify({
+      version: 1,
+      activeId: state.activeId,
+      projects: compactProjects,
+    }),
+    safe,
+  };
 }
 
 async function saveDesktopStateNow(state: StoredState): Promise<'ok' | 'error'> {
@@ -201,11 +217,11 @@ async function saveDesktopStateNow(state: StoredState): Promise<'ok' | 'error'> 
       }
     }
 
-    const body = buildCompactDesktopJson(state, false);
+    const compact = buildCompactDesktopJson(state, false);
     const putState = await desktopFetch('/api/state', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json; charset=utf-8' },
-      body,
+      body: compact.body,
     });
     if (!putState.ok) return 'error';
 
@@ -233,15 +249,18 @@ function setupDesktopLifecycle(env: DesktopEnv): void {
     try {
       const latest = flushProvider ? flushProvider() : pendingState;
       if (latest && latest.projects.length > 0) {
-        const compactBody = buildCompactDesktopJson(latest, true);
-        if (compactBody.length < 60000) {
+        const compact = buildCompactDesktopJson(latest, true);
+        // Не отправляем состояние со ссылками на незагруженные картинки —
+        // иначе после перезапуска эти миры пропадут. Обычное сохранение
+        // (persistState) догрузит блобы и запишет всё как надо.
+        if (compact.safe && compact.body.length < 60000) {
           void fetch('/api/state', {
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json; charset=utf-8',
               'X-Atlas-Token': env.token,
             },
-            body: compactBody,
+            body: compact.body,
             keepalive: true,
           }).catch(() => {});
         }

@@ -1,0 +1,87 @@
+name: Android APK
+
+# Собирает APK в облаке: здесь не нужен ни Android Studio, ни локальный SDK.
+# Запуск: GitHub → Actions → «Android APK» → Run workflow.
+# Или автоматически по тегу: git tag android-1 && git push origin android-1
+on:
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: 'Адрес онлайн-сервера (по нему APK подключается к комнатам)'
+        required: false
+        default: 'https://8080-imalmdvtx0w9kk62wf3ij.e2b.app'
+      release:
+        description: 'Выложить APK в релиз android-latest (скачивается с телефона без входа)'
+        type: boolean
+        default: true
+  push:
+    tags:
+      - 'android-*'
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    name: Сборка APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Зависимости
+        run: npm ci
+
+      - name: Веб-сборка (адрес сервера вшивается в APK)
+        env:
+          VITE_SERVER_URL: ${{ inputs.server_url }}
+        run: npm run build
+
+      - name: Иконки и Capacitor sync
+        run: |
+          node scripts/build-app-icons.mjs
+          npx cap sync android
+
+      - name: "Gradle: assembleDebug"
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Готовый APK
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/debug/app-debug.apk out/RevealAtlas.apk
+          ls -lh out/RevealAtlas.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RevealAtlas-apk
+          path: out/RevealAtlas.apk
+          if-no-files-found: error
+
+      # Релиз android-latest: прямой публичный адрес, телефон скачивает без входа.
+      - name: Релиз с APK
+        if: ${{ inputs.release != 'false' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-latest
+          name: Reveal Atlas — Android (debug-сборка)
+          prerelease: true
+          make_latest: false
+          body: |
+            Установка на Android:
+            1. Скачать `RevealAtlas.apk` на телефон.
+            2. Разрешить установку из неизвестных источников (Android спросит сам).
+            3. Открыть «Онлайн» → в поле «Сервер» указать адрес сервера, если он изменился.
+
+            Сборка debug: подписана отладочным ключом, обновления поверх себя встанут.
+            Адрес онлайн-сервера вшит в сборку, его всегда можно поменять в приложении.
+          files: out/RevealAtlas.apk
