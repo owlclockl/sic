@@ -1,4 +1,5 @@
 import { DEFAULT_GRID, type GridConfig } from './grid';
+import type { ProceduralWorld, WorldBiome } from './proceduralWorld';
 import { decodeBits, emptyRevealed, encodeBits, type Revealed } from './bits';
 
 export interface ProjectImage {
@@ -19,6 +20,8 @@ export interface Project {
   grid: GridConfig;
   revealed: { cols: number; rows: number; bits: string };
   brushSize: number;
+  /** When present, this project is rendered as a truly unbounded procedural voxel map. */
+  world?: ProceduralWorld;
 }
 
 export interface StoredState {
@@ -78,6 +81,7 @@ interface RawProject {
   grid?: Partial<GridConfig>;
   revealed?: { cols?: unknown; rows?: unknown; bits?: unknown };
   brushSize?: unknown;
+  world?: { seed?: unknown; biome?: unknown };
 }
 
 /** Приводит проект из localStorage/JSON к актуальной схеме. */
@@ -104,6 +108,14 @@ export function normalizeProject(raw: unknown): Project | null {
   const rows = Math.max(0, Math.round(Number(rawRevealed.rows) || 0));
   const bits = typeof rawRevealed.bits === 'string' ? rawRevealed.bits : '';
 
+  const rawWorld = p.world;
+  const world: ProceduralWorld | undefined = rawWorld && Number.isFinite(Number(rawWorld.seed))
+    ? {
+        seed: Math.trunc(Number(rawWorld.seed)),
+        biome: (['temperate', 'desert', 'frozen'].includes(String(rawWorld.biome)) ? rawWorld.biome : 'temperate') as WorldBiome,
+      }
+    : undefined;
+
   return {
     id: typeof p.id === 'string' && p.id ? p.id : newId(),
     name: typeof p.name === 'string' && p.name.trim() ? p.name.trim().slice(0, 60) : 'Мир',
@@ -118,6 +130,7 @@ export function normalizeProject(raw: unknown): Project | null {
     grid,
     revealed: { cols, rows, bits },
     brushSize: Number.isFinite(Number(p.brushSize)) ? Math.min(9, Math.max(1, Math.round(Number(p.brushSize)))) : 1,
+    ...(world ? { world } : {}),
   };
 }
 

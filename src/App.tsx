@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DragEvent as ReactDragEvent } from 'react';
 import { MapView, type MapHandle, type RemoteCursor, type Tool } from './components/MapView';
+import { InfiniteWorldView } from './components/InfiniteWorldView';
+import { WorldSettingsPanel } from './components/WorldSettingsPanel';
 import { Sidebar } from './components/Sidebar';
 import { SettingsPanel } from './components/SettingsPanel';
 import { OnlinePanel, type ChatEntry } from './components/OnlinePanel';
@@ -40,6 +42,7 @@ import {
 } from './lib/storage';
 import { readImage, recommendedMaxSide, shrinkImage } from './lib/image';
 import { createDemoWorld } from './lib/demoWorld';
+import { createWorldPreview, type WorldBiome, type ProceduralWorld } from './lib/proceduralWorld';
 import {
   defaultServerUrl,
   fetchImageAsDataUrl,
@@ -108,12 +111,23 @@ function demoImage(): ProjectImage {
   return demoImageCache;
 }
 
+function createProceduralProject(name: string, world: ProceduralWorld): Project {
+  const project = createProject(name, {
+    name: `Pixel world · ${world.seed}`,
+    width: 256,
+    height: 160,
+    dataUrl: createWorldPreview(world),
+  }, DEMO_GRID);
+  project.world = world;
+  return project;
+}
+
 function initialState(): { projects: Project[]; activeId: string | null } {
   const stored = getInitialStoredState();
   if (stored && stored.projects.length > 0) {
     return { projects: stored.projects, activeId: stored.activeId ?? stored.projects[0].id };
   }
-  const project = createProject('Демо-мир', demoImage(), DEMO_GRID);
+  const project = createProceduralProject('Бескрайний мир', { seed: 486201, biome: 'temperate' });
   return { projects: [project], activeId: project.id };
 }
 
@@ -143,6 +157,10 @@ export default function App() {
   const [toast, setToast] = useState<Toast>(null);
   const [dragOver, setDragOver] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [generatorOpen, setGeneratorOpen] = useState(false);
+  const [generatorName, setGeneratorName] = useState('Новый бескрайний мир');
+  const [generatorSeed, setGeneratorSeed] = useState(() => Math.floor(Math.random() * 2_000_000_000) + 1);
+  const [generatorBiome, setGeneratorBiome] = useState<WorldBiome>('temperate');
   const [mobileHint, setMobileHint] = useState(() => {
     if (typeof window === 'undefined' || window.innerWidth > 980) return false;
     try {
@@ -162,6 +180,7 @@ export default function App() {
   );
 
   const image = activeProject?.image ?? demoImage();
+  const proceduralWorld = activeProject?.world ?? null;
   const grid = useMemo(() => computeGrid(image.width, image.height, gridConfig), [image, gridConfig]);
   const totalCells = grid.cols * grid.rows;
   const revealedCount = useMemo(() => countRevealed(revealed), [revealed]);
@@ -355,6 +374,18 @@ export default function App() {
     setUndoCount(0);
   }, []);
 
+  const createGeneratedWorld = useCallback(() => {
+    const world: ProceduralWorld = { seed: Math.trunc(generatorSeed) || 1, biome: generatorBiome };
+    const project = createProceduralProject(generatorName.trim() || 'Бескрайний мир', world);
+    commitActive();
+    setProjects((prev) => [project, ...prev]);
+    loadProjectIntoEditor(project);
+    setGeneratorOpen(false);
+    setSidebarOpen(false);
+    setSettingsOpen(true);
+    showToast('info', `Мир создан · seed ${world.seed}. Исследуйте его без границ.`);
+  }, [generatorSeed, generatorBiome, generatorName, commitActive, loadProjectIntoEditor, showToast]);
+
   const handleSelectProject = useCallback(
     (id: string) => {
       if (id === activeId) {
@@ -536,6 +567,14 @@ export default function App() {
     [activeProject, gridConfig, online.room, showToast],
   );
 
+  const updateGeneratedWorld = useCallback((world: ProceduralWorld) => {
+    if (!activeId) return;
+    const preview = createWorldPreview(world);
+    setProjects((prev) => prev.map((project) => project.id === activeId && project.world
+      ? { ...project, world, image: { ...project.image, name: `Pixel world · ${world.seed}`, dataUrl: preview }, updatedAt: Date.now() }
+      : project));
+  }, [activeId]);
+
   const renameProject = useCallback(
     (name: string) => {
       if (!activeId) return;
@@ -553,9 +592,9 @@ export default function App() {
           loadProjectIntoEditor(remaining[0]);
           setProjects(remaining);
         } else {
-          const demo = createProject('Демо-мир', demoImage(), DEMO_GRID);
-          setProjects([demo]);
-          loadProjectIntoEditor(demo);
+          const fallbackWorld = createProceduralProject('Бескрайний мир', { seed: Math.floor(Math.random() * 2_000_000_000) + 1, biome: 'temperate' });
+          setProjects([fallbackWorld]);
+          loadProjectIntoEditor(fallbackWorld);
         }
       } else {
         setProjects(remaining);
@@ -679,7 +718,7 @@ export default function App() {
     setRoomInviteUrl(null);
     if (!projectId) return;
     const remaining = latestRef.current.projects.filter((p) => p.id !== projectId);
-    const fallback = remaining[0] ?? createProject('Демо-мир', demoImage(), DEMO_GRID);
+    const fallback = remaining[0] ?? createProceduralProject('Бескрайний мир', { seed: Math.floor(Math.random() * 2_000_000_000) + 1, biome: 'temperate' });
     setProjects(remaining.length > 0 ? remaining : [fallback]);
     if (latestRef.current.activeId === projectId) loadProjectIntoEditor(fallback);
   }, [loadProjectIntoEditor, setRoomInviteUrl]);
@@ -958,7 +997,7 @@ export default function App() {
       const previous = roomProjectIdRef.current;
       if (previous && previous !== roomProjectIdOf(clean)) {
         const remaining = latestRef.current.projects.filter((p) => p.id !== previous);
-        setProjects(remaining.length > 0 ? remaining : [createProject('Демо-мир', demoImage(), DEMO_GRID)]);
+        setProjects(remaining.length > 0 ? remaining : [createProceduralProject('Бескрайний мир', { seed: Math.floor(Math.random() * 2_000_000_000) + 1, biome: 'temperate' })]);
       }
       client.joinRoom(clean);
     },
@@ -1121,6 +1160,7 @@ export default function App() {
         </div>
 
         <div className="toolbar">
+          {!proceduralWorld && <>
           <div className="tool-group" role="group" aria-label="Инструмент">
             <button
               className={`tool-btn${tool === 'reveal' ? ' is-active' : ''}`}
@@ -1176,6 +1216,7 @@ export default function App() {
             </button>
           </div>
 
+          </>}
           <div className="tool-group zoom-group">
             <button className="tool-btn" onClick={() => mapRef.current?.zoomBy(1 / 1.3)} title="Уменьшить">−</button>
             <span className="zoom-value">{Math.round(scale * 100)}%</span>
@@ -1184,7 +1225,7 @@ export default function App() {
           </div>
         </div>
 
-        <button
+        {!proceduralWorld && <button
           className={`tool-btn online-btn${online.room ? ' is-active' : ''}${online.unread > 0 ? ' has-unread' : ''}`}
           onClick={() => toggleDrawer('online')}
           aria-label="Онлайн-режим"
@@ -1194,7 +1235,7 @@ export default function App() {
           <span className={`online-dot is-${online.status}`} aria-hidden />
           <span>{online.room ? `Онлайн · ${online.room.code}` : 'Онлайн'}</span>
           {online.unread > 0 && <span className="online-unread">{online.unread}</span>}
-        </button>
+        </button>}
 
         <button
           className={`icon-btn settings-toggle${settingsOpen ? ' is-active' : ''}`}
@@ -1226,6 +1267,12 @@ export default function App() {
             onlineRoomId={roomProjectId}
             onSelect={handleSelectProject}
             onNew={addProject}
+            onGenerate={() => {
+              setGeneratorSeed(Math.floor(Math.random() * 2_000_000_000) + 1);
+              setGeneratorName('Новый бескрайний мир');
+              setGeneratorBiome('temperate');
+              setGeneratorOpen(true);
+            }}
             onImport={importProject}
             onExport={exportProject}
             onDelete={deleteProject}
@@ -1242,44 +1289,56 @@ export default function App() {
             }
           }}
         >
-          <MapView
-            ref={mapRef}
-            projectId={activeProject?.id ?? 'none'}
-            image={image}
-            grid={grid}
-            revealed={revealed}
-            brushSize={brushSize}
-            tool={tool}
-            showGrid={showGrid}
-            onPaint={handlePaint}
-            onStrokeStart={handleStrokeStart}
-            onStrokeEnd={handleStrokeEnd}
-            onScaleChange={setScale}
-            remoteCursors={roomActive ? remoteCursors : []}
-            onCursor={handleCursorMove}
-          />
+          {proceduralWorld ? (
+            <InfiniteWorldView ref={mapRef} world={proceduralWorld} onScaleChange={setScale} />
+          ) : (
+            <MapView
+              ref={mapRef}
+              projectId={activeProject?.id ?? 'none'}
+              image={image}
+              grid={grid}
+              revealed={revealed}
+              brushSize={brushSize}
+              tool={tool}
+              showGrid={showGrid}
+              onPaint={handlePaint}
+              onStrokeStart={handleStrokeStart}
+              onStrokeEnd={handleStrokeEnd}
+              onScaleChange={setScale}
+              remoteCursors={roomActive ? remoteCursors : []}
+              onCursor={handleCursorMove}
+            />
+          )}
 
-          <div className="hud">
-            <div className="hud-progress">
-              <div className="hud-bar">
-                <div className="hud-bar-fill" style={{ width: `${progress * 100}%` }} />
+          {proceduralWorld ? (
+            <div className="procedural-hud">
+              <strong>Мир без края</strong>
+              <span>Перетаскивайте карту для исследования · колесо — приближение</span>
+              <small>Любые координаты генерируются из seed и сохраняют одинаковый ландшафт.</small>
+            </div>
+          ) : (
+            <div className="hud">
+              <div className="hud-progress">
+                <div className="hud-bar">
+                  <div className="hud-bar-fill" style={{ width: `${progress * 100}%` }} />
+                </div>
+                <span className="hud-percent">{(progress * 100).toFixed(progress > 0 && progress < 0.1 ? 1 : 0)}%</span>
               </div>
-              <span className="hud-percent">{(progress * 100).toFixed(progress > 0 && progress < 0.1 ? 1 : 0)}%</span>
+              <div className="hud-meta">
+                {online.room && (
+                  <span className="hud-online" title="Идёт общая игра через сервер">
+                    ОНЛАЙН · {online.room.code} · {online.room.players.length} игр.
+                  </span>
+                )}
+                <span>{revealedCount.toLocaleString('ru-RU')} / {totalCells.toLocaleString('ru-RU')} клеток</span>
+                <span className="hud-sep">·</span>
+                <span>сетка {grid.cols}×{grid.rows}</span>
+                <span className="hud-sep">·</span>
+                <span>{Math.round(grid.tileW)} px</span>
+              </div>
+              <div className="hud-hint">{toolHint} Колесо — зум, Shift+перетаскивание — панорама.</div>
             </div>
-            <div className="hud-meta">
-              {online.room && (
-                <span className="hud-online" title="Идёт общая игра через сервер">
-                  ОНЛАЙН · {online.room.code} · {online.room.players.length} игр.
-                </span>
-              )}
-              <span>{revealedCount.toLocaleString('ru-RU')} / {totalCells.toLocaleString('ru-RU')} клеток</span>
-              <span className="hud-sep">·</span>
-              <span>сетка {grid.cols}×{grid.rows}</span>
-              <span className="hud-sep">·</span>
-              <span>{Math.round(grid.tileW)} px</span>
-            </div>
-            <div className="hud-hint">{toolHint} Колесо — зум, Shift+перетаскивание — панорама.</div>
-          </div>
+          )}
 
           {dragOver && (
             <div className="drop-zone">
@@ -1322,7 +1381,19 @@ export default function App() {
         </div>
 
         <div className={settingsOpen ? 'settings-shell is-open' : 'settings-shell'}>
-          {activeProject && (
+          {activeProject && proceduralWorld ? (
+            <WorldSettingsPanel
+              project={activeProject}
+              world={proceduralWorld}
+              onRename={renameProject}
+              onWorldChange={updateGeneratedWorld}
+              onExport={() => exportProject(activeProject.id)}
+              onDelete={() => {
+                if (confirm(`Удалить «${activeProject.name}»?`)) deleteProject(activeProject.id);
+              }}
+              onClose={() => setSettingsOpen(false)}
+            />
+          ) : activeProject && (
             <SettingsPanel
               project={activeProject}
               progress={progress}
@@ -1357,7 +1428,7 @@ export default function App() {
             </div>
           )}
 
-          <div className="dock-progress">
+          {!proceduralWorld && <div className="dock-progress">
             <div className="dock-bar">
               <div className="dock-bar-fill" style={{ width: `${progress * 100}%` }} />
             </div>
@@ -1367,9 +1438,9 @@ export default function App() {
             <span className="dock-count">
               {revealedCount.toLocaleString('ru-RU')} / {totalCells.toLocaleString('ru-RU')}
             </span>
-          </div>
+          </div>}
 
-          <div className="dock-tools" role="group" aria-label="Инструмент">
+          {!proceduralWorld && <div className="dock-tools" role="group" aria-label="Инструмент">
             <button
               className={tool === 'reveal' ? 'is-active' : ''}
               onClick={() => setTool('reveal')}
@@ -1394,9 +1465,10 @@ export default function App() {
               <b aria-hidden>✥</b>
               <span>Рука</span>
             </button>
-          </div>
+          </div>}
 
           <div className="dock-actions">
+            {!proceduralWorld && <>
             <button onClick={cycleBrush} title="Размер кисти">
               <b>{brushSize}×{brushSize}</b>
               <span>Кисть</span>
@@ -1418,7 +1490,8 @@ export default function App() {
               <b aria-hidden>⤢</b>
               <span>Вписать</span>
             </button>
-            <button
+            </>}
+            {!proceduralWorld && <button
               className={onlineOpen ? 'is-active' : ''}
               onClick={() => toggleDrawer('online')}
               aria-pressed={onlineOpen}
@@ -1426,7 +1499,7 @@ export default function App() {
             >
               <b aria-hidden>⬢</b>
               <span>Онлайн{online.unread > 0 ? ` · ${online.unread}` : ''}</span>
-            </button>
+            </button>}
             <button
               className={settingsOpen ? 'is-active' : ''}
               onClick={() => toggleDrawer('settings')}
@@ -1440,6 +1513,35 @@ export default function App() {
         </nav>
       </div>
 
+      {generatorOpen && (
+        <div className="generator-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setGeneratorOpen(false); }}>
+          <section className="generator-dialog" role="dialog" aria-modal="true" aria-labelledby="generator-title">
+            <div className="generator-dialog-head">
+              <div><span className="generator-kicker">PROCEDURAL WORLD BUILDER</span><h2 id="generator-title">Создать бескрайний мир</h2></div>
+              <button className="icon-btn" onClick={() => setGeneratorOpen(false)} aria-label="Закрыть">✕</button>
+            </div>
+            <p>Территория не загружается целиком — каждый участок генерируется по координатам, когда вы туда доходите.</p>
+            <label className="field-label" htmlFor="generator-name">Название карты</label>
+            <input id="generator-name" className="text-input" value={generatorName} maxLength={60} onChange={(event) => setGeneratorName(event.target.value)} />
+            <label className="field-label" htmlFor="generator-biome">Стартовый биом</label>
+            <select id="generator-biome" className="text-input" value={generatorBiome} onChange={(event) => setGeneratorBiome(event.target.value as WorldBiome)}>
+              <option value="temperate">🌲 Зелёный мир</option>
+              <option value="desert">🏜️ Пустынный мир</option>
+              <option value="frozen">❄️ Ледяной мир</option>
+            </select>
+            <label className="field-label" htmlFor="generator-seed">Seed — ключ всего мира</label>
+            <div className="seed-row">
+              <input id="generator-seed" className="text-input" type="number" value={generatorSeed} onChange={(event) => setGeneratorSeed(Number(event.target.value))} />
+              <button className="btn btn-ghost seed-randomize" onClick={() => setGeneratorSeed(Math.floor(Math.random() * 2_000_000_000) + 1)} title="Случайный ключ">⟳</button>
+            </div>
+            <div className="generator-note"><span>∞</span><div><strong>Без границ и загрузок</strong><small>Можно бесконечно идти в любом направлении. Тот же seed всегда восстановит ту же карту.</small></div></div>
+            <div className="generator-actions">
+              <button className="btn btn-ghost" onClick={() => setGeneratorOpen(false)}>Отмена</button>
+              <button className="btn btn-primary" onClick={createGeneratedWorld}>▦ Создать мир</button>
+            </div>
+          </section>
+        </div>
+      )}
       {toast && <div className={`toast toast-${toast.kind}`}>{toast.text}</div>}
     </div>
   );

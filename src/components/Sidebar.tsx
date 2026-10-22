@@ -10,6 +10,7 @@ interface SidebarProps {
   onlineRoomId?: string | null;
   onSelect: (id: string) => void;
   onNew: (file: File) => void;
+  onGenerate: () => void;
   onImport: (file: File) => void;
   onExport: (id: string) => void;
   onDelete: (id: string) => void;
@@ -23,6 +24,7 @@ export function Sidebar({
   onlineRoomId = null,
   onSelect,
   onNew,
+  onGenerate,
   onImport,
   onExport,
   onDelete,
@@ -44,8 +46,11 @@ export function Sidebar({
       </div>
 
       <div className="sidebar-actions">
-        <button className="btn btn-primary" onClick={() => newInputRef.current?.click()}>
-          + Новый мир
+        <button className="btn btn-primary" onClick={onGenerate}>
+          ▦ Бесконечный мир
+        </button>
+        <button className="btn btn-ghost" onClick={() => newInputRef.current?.click()}>
+          ↑ Своя карта
         </button>
         <button className="btn btn-ghost" onClick={() => importInputRef.current?.click()} title="Загрузить проект из JSON">
           ↓ Импорт
@@ -102,7 +107,7 @@ export function Sidebar({
                     {project.id === onlineRoomId && <span className="project-online">ОНЛАЙН</span>}
                   </span>
                   <span className="project-sub">
-                    {project.image.width}×{project.image.height} · {Math.round(open * 100)}%
+                    {project.world ? `∞ · seed ${project.world.seed}` : `${project.image.width}×${project.image.height} · ${Math.round(open * 100)}%`}
                   </span>
                 </div>
                 <div className="project-tools">
