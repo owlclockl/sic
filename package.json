@@ -13,6 +13,7 @@
     "online": "node server/index.mjs",
     "start": "node server/index.mjs",
     "online:tunnel": "node scripts/online-tunnel.mjs",
+    "phone": "node scripts/phone-access.mjs",
     "cloudflared": "node scripts/install-cloudflared.mjs",
     "test:online": "node scripts/online-selftest.mjs && node scripts/online-client-selftest.mjs",
     "test:online:server": "node scripts/online-selftest.mjs",
@@ -28,6 +29,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "qrcode": "^1.5.4",
     "typescript": "^5.6.3",
     "vite": "^5.4.11"
   }

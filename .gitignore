@@ -13,3 +13,6 @@ data/
 # cloudflared (скачивается скриптом scripts/install-cloudflared.mjs)
 .tools/
 .tools-tmp-*/
+
+# QR-код доступа с телефона (зависит от песочницы)
+phone-access.png
