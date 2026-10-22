@@ -41,9 +41,12 @@ jobs:
       - name: Зависимости
         run: npm ci
 
+      # Адрес сервера: из входного параметра запуска, иначе из переменной
+      # репозитория SERVER_URL (Settings → Secrets and variables → Actions).
+      # Пусто — приложение спросит адрес в панели «Онлайн».
       - name: Веб-сборка (адрес сервера вшивается в APK)
         env:
-          VITE_SERVER_URL: ${{ inputs.server_url }}
+          VITE_SERVER_URL: ${{ inputs.server_url || vars.SERVER_URL }}
         run: npm run build
 
       - name: Иконки и Capacitor sync

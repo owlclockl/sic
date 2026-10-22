@@ -27,6 +27,24 @@ interface OnlinePanelProps {
   onClose: () => void;
 }
 
+/**
+ * Приложение запущено как нативное (APK), а не в браузере: тогда origin
+ * приложения — https://localhost, и онлайн-сервер надо указать вручную.
+ */
+function isNativeApp(): boolean {
+  if (typeof window === 'undefined') return false;
+  const cap = (window as unknown as {
+    Capacitor?: { isNativePlatform?: () => boolean; getPlatform?: () => string };
+  }).Capacitor;
+  try {
+    if (typeof cap?.isNativePlatform === 'function' && cap.isNativePlatform()) return true;
+    const platform = typeof cap?.getPlatform === 'function' ? cap.getPlatform() : '';
+    return platform === 'android' || platform === 'ios';
+  } catch {
+    return false;
+  }
+}
+
 const STATUS_TEXT: Record<OnlineStatus, string> = {
   idle: 'Не в сети',
   connecting: 'Подключение…',
@@ -129,7 +147,9 @@ export function OnlinePanel({
           onChange={(e) => onServerUrlChange(e.target.value)}
         />
         <p className="hint">
-          По умолчанию — тот же адрес, с которым открыто приложение. Свой сервер: <code>npm run online</code>.
+          {isNativeApp()
+            ? 'Это приложение для Android: localhost здесь ни к чему не подключится. Впишите адрес сервера (например, https://atlas.trycloudflare.com), иначе доступна только одиночная игра.'
+            : 'По умолчанию — тот же адрес, с которым открыто приложение. Свой сервер: <code>npm run online</code>.'}
         </p>
       </section>
 
