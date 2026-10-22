@@ -14,6 +14,7 @@
     "start": "node server/index.mjs",
     "online:tunnel": "node scripts/online-tunnel.mjs",
     "phone": "node scripts/phone-access.mjs",
+    "apk:qr": "node scripts/phone-access.mjs --url https://github.com/owlclockl/sic/releases/download/android-latest/RevealAtlas.apk --out phone-apk.png",
     "cloudflared": "node scripts/install-cloudflared.mjs",
     "icons": "node scripts/build-app-icons.mjs",
     "android:sync": "npm run build && node scripts/build-app-icons.mjs && cap sync android",
