@@ -38,15 +38,17 @@ function Unpack-Payload([string]$fullText, [string]$name) {
   return ,$res
 }
 
-function Find-ChromiumBrowser {
-  $regNames = @('msedge.exe', 'chrome.exe', 'browser.exe', 'brave.exe', 'vivaldi.exe')
+function Find-ChromiumBrowsers {
+  $raw = New-Object System.Collections.ArrayList
+
+  $regNames = @('msedge.exe', 'chrome.exe', 'browser.exe', 'brave.exe', 'vivaldi.exe', 'opera.exe')
   foreach ($exe in $regNames) {
     foreach ($hive in @('HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\')) {
       $regPath = $hive + $exe
       if (Test-Path -LiteralPath $regPath) {
         try {
           $val = (Get-ItemProperty -LiteralPath $regPath -ErrorAction SilentlyContinue).'(default)'
-          if ($val -and (Test-Path -LiteralPath $val)) { return $val }
+          if ($val) { [void]$raw.Add([string]$val) }
         } catch {}
       }
     }
@@ -63,6 +65,7 @@ function Find-ChromiumBrowser {
     $candidates += [IO.Path]::Combine($env:ProgramFiles, 'Microsoft\Edge\Application\msedge.exe')
     $candidates += [IO.Path]::Combine($env:ProgramFiles, 'Google\Chrome\Application\chrome.exe')
     $candidates += [IO.Path]::Combine($env:ProgramFiles, 'BraveSoftware\Brave-Browser\Application\brave.exe')
+    $candidates += [IO.Path]::Combine($env:ProgramFiles, 'Opera\opera.exe')
   }
   if ($env:LOCALAPPDATA) {
     $candidates += [IO.Path]::Combine($env:LOCALAPPDATA, 'Microsoft\Edge\Application\msedge.exe')
@@ -70,24 +73,143 @@ function Find-ChromiumBrowser {
     $candidates += [IO.Path]::Combine($env:LOCALAPPDATA, 'Yandex\YandexBrowser\Application\browser.exe')
     $candidates += [IO.Path]::Combine($env:LOCALAPPDATA, 'BraveSoftware\Brave-Browser\Application\brave.exe')
     $candidates += [IO.Path]::Combine($env:LOCALAPPDATA, 'Vivaldi\Application\vivaldi.exe')
+    $candidates += [IO.Path]::Combine($env:LOCALAPPDATA, 'Programs\Opera\opera.exe')
   }
+  foreach ($p in $candidates) { [void]$raw.Add($p) }
 
-  foreach ($p in $candidates) {
-    if ($p -and (Test-Path -LiteralPath $p)) { return $p }
+  $result = New-Object System.Collections.ArrayList
+  $seen = @{}
+  foreach ($p in $raw) {
+    if ([string]::IsNullOrEmpty($p)) { continue }
+    try {
+      if (-not (Test-Path -LiteralPath $p)) { continue }
+      $full = (Get-Item -LiteralPath $p).FullName
+    } catch {
+      continue
+    }
+    $key = $full.ToLowerInvariant()
+    if ($seen.ContainsKey($key)) { continue }
+    $seen[$key] = $true
+    [void]$result.Add($full)
   }
-  return $null
+  return $result
 }
 
-function Launch-AppWindow([string]$url, [string]$dataDir) {
-  $browserExe = Find-ChromiumBrowser
+function Start-AppWindow([string]$browserExe, [string]$url, [string]$dataDir) {
+  # One profile per browser: Chromium variants do not always accept a user-data-dir
+  # written by another (newer) sibling, and the next candidate must start clean.
+  $profileName = 'window-profile'
   if ($browserExe) {
-    $profileDir = [IO.Path]::Combine($dataDir, 'window-profile')
-    [IO.Directory]::CreateDirectory($profileDir) | Out-Null
-    $cmdArgs = '--user-data-dir="' + $profileDir + '" --app="' + $url + '" --window-size=1380,880 --no-first-run --no-default-browser-check --disable-features=Translate,msEdgeSidebarV2,msHubApps,EdgeCollections --disable-extensions --disable-sync --disable-background-mode'
-    Start-Process -FilePath $browserExe -ArgumentList $cmdArgs | Out-Null
-  } else {
-    Start-Process $url | Out-Null
+    $exeName = [IO.Path]::GetFileNameWithoutExtension($browserExe)
+    $profileName = 'window-profile-' + $exeName.ToLowerInvariant()
   }
+  $profileDir = [IO.Path]::Combine($dataDir, $profileName)
+  [IO.Directory]::CreateDirectory($profileDir) | Out-Null
+  $cmdArgs = '--user-data-dir="' + $profileDir + '" --app="' + $url + '" --window-size=1380,880 --no-first-run --no-default-browser-check --disable-features=Translate,msEdgeSidebarV2,msHubApps,EdgeCollections --disable-extensions --disable-sync --disable-background-mode'
+  if ($browserExe) {
+    return Start-Process -FilePath $browserExe -ArgumentList $cmdArgs -PassThru -ErrorAction Stop
+  }
+
+  # Default handler: some shell handlers do not expose a process handle, so the
+  # launch itself is retried without -PassThru and reported as 'started'.
+  $proc = $null
+  try {
+    $proc = Start-Process -FilePath $url -PassThru -ErrorAction Stop
+  } catch {
+    $proc = $null
+  }
+  if (-not $proc) {
+    Start-Process -FilePath $url -ErrorAction Stop | Out-Null
+    return $true
+  }
+  return $proc
+}
+
+function Test-ProcessExited($proc) {
+  if (-not $proc) { return $false }
+  if ($proc -isnot [System.Diagnostics.Process]) { return $false }
+  try { return $proc.HasExited } catch { return $false }
+}
+
+function Wait-ForAppConnect($server, $proc, [int]$timeoutMs) {
+  $deadline = [DateTime]::UtcNow.AddMilliseconds($timeoutMs)
+  while ([DateTime]::UtcNow -lt $deadline) {
+    if ($server.HasConnected) { return 'connected' }
+    if (Test-ProcessExited $proc) { return 'exited' }
+    Start-Sleep -Milliseconds 120
+  }
+  if ($server.HasConnected) { return 'connected' }
+  if (Test-ProcessExited $proc) { return 'exited' }
+  return 'timeout'
+}
+
+# Tries every installed Chromium browser until one of them really opens the app
+# window (a browser that cannot start, e.g. with a broken side-by-side manifest,
+# is skipped instead of failing the whole launch).
+# Returns $null on success, otherwise a short report of what was attempted.
+function Launch-AppWindow([string]$url, [string]$dataDir, $server) {
+  $notes = New-Object System.Collections.ArrayList
+  foreach ($exe in @(Find-ChromiumBrowsers)) {
+    if ([string]::IsNullOrEmpty($exe)) { continue }
+    $proc = $null
+    try {
+      $proc = Start-AppWindow $exe $url $dataDir
+    } catch {
+      [void]$notes.Add([IO.Path]::GetFileName($exe) + ' -> ' + $_.Exception.Message)
+      continue
+    }
+    if (-not $server) { return $null }
+    $state = Wait-ForAppConnect $server $proc 20000
+    if ($state -eq 'connected') { return $null }
+    if ($state -eq 'timeout' -and ($proc -is [System.Diagnostics.Process]) -and (-not (Test-ProcessExited $proc))) {
+      try { $proc.Kill() } catch {}
+    }
+    [void]$notes.Add([IO.Path]::GetFileName($exe) + ' -> ' + $state)
+  }
+
+  # Last resort: let Windows open the URL in the default browser.
+  $proc = $null
+  try {
+    $proc = Start-AppWindow '' $url $dataDir
+  } catch {
+    [void]$notes.Add('default browser -> ' + $_.Exception.Message)
+  }
+  if ($proc -and (-not $server)) { return $null }
+  if ($proc) {
+    $state = Wait-ForAppConnect $server $proc 25000
+    if ($state -eq 'connected') { return $null }
+    [void]$notes.Add('default browser -> ' + $state)
+  }
+  return ($notes -join '; ')
+}
+
+function Show-LaunchFailure([string]$detail, [string]$url) {
+  # Message text is Russian, so it is embedded as base64 to keep this file ASCII-only.
+  $tplB64 = @(
+    'UmV2ZWFsIEF0bGFzINGB0LzQvtCzINC30LDQv9GD0YHRgtC40YLRjNGB0Y8sINC90L4gV2luZG93cyDQvdC1INC00LDQu9Cw'
+    'INC+0YLQutGA0YvRgtGMINC+0LrQvdC+INC/0YDQvtCz0YDQsNC80LzRizoK0LHRgNCw0YPQt9C10YAsINCyINC60L7RgtC+'
+    '0YDQvtC8INC00L7Qu9C20L3QviDQvtGC0LrRgNGL0YLRjNGB0Y8g0L7QutC90L4sINC90LUg0YHRgtCw0YDRgtGD0LXRgi4K'
+    'CtCn0LDRidC1INCy0YHQtdCz0L4g0Y3RgtC+INC+0YjQuNCx0LrQsCDCq3NpZGUtYnktc2lkZSBjb25maWd1cmF0aW9uIGlz'
+    'IGluY29ycmVjdMK7ICjQutC+0LQgMTQwMDEpCtCyINGB0LDQvNC+0Lwg0LHRgNCw0YPQt9C10YDQtSAo0L7QsdGL0YfQvdC+'
+    'INCyIE1pY3Jvc29mdCBFZGdlKSwg0LAg0L3QtSDQsiBSZXZlYWwgQXRsYXMuCgrQp9GC0L4g0LzQvtC20L3QviDRgdC00LXQ'
+    'u9Cw0YLRjDoKMS4g0J7RgtC60YDQvtC50YLQtSDQv9GA0L7Qs9GA0LDQvNC80YMg0LLRgNGD0YfQvdGD0Y4g0LIg0LvRjtCx'
+    '0L7QvCDQsdGA0LDRg9C30LXRgNC1OgogICB7dXJsfQoyLiDQntCx0L3QvtCy0LjRgtC1INC40LvQuCDQv9C10YDQtdGD0YHR'
+    'gtCw0L3QvtCy0LjRgtC1IE1pY3Jvc29mdCBFZGdlLCDQu9C40LHQviDRg9GB0YLQsNC90L7QstC40YLQtSBHb29nbGUgQ2hy'
+    'b21lCiAgINC40LvQuCDQr9C90LTQtdC60YEu0JHRgNCw0YPQt9C10YAg0Lgg0LfQsNC/0YPRgdGC0LjRgtC1IFJldmVhbEF0'
+    'bGFzLmNtZCDQt9Cw0L3QvtCy0L4uCjMuINCf0L7QtNGA0L7QsdC90LDRjyDQtNC40LDQs9C90L7RgdGC0LjQutCwOiBSZXZl'
+    'YWxBdGxhcy5jbWQgLS1kZWJ1ZwoK0J/QvtC/0YvRgtC60Lgg0LfQsNC/0YPRgdC60LA6IHtkZXRhaWx9'
+  ) -join ''
+  $tpl = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($tplB64))
+  $body = $tpl.Replace('{url}', $url).Replace('{detail}', $detail)
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.MessageBox]::Show(
+      $body,
+      'Reveal Atlas',
+      [System.Windows.Forms.MessageBoxButtons]::OK,
+      [System.Windows.Forms.MessageBoxIcon]::Warning
+    ) | Out-Null
+  } catch {}
 }
 
 try {
@@ -149,7 +271,16 @@ try {
             }
           } catch {}
           if (-not $focused) {
-            Launch-AppWindow ('http://127.0.0.1:' + $existingPort + '/') $dataDir
+            $existingUrl = 'http://127.0.0.1:' + $existingPort + '/'
+            $detail = Launch-AppWindow $existingUrl $dataDir $null
+            if ($detail) {
+              if ($env:RA_MODE -ieq '--debug') {
+                Write-Warning ('Unable to open the application window: ' + $detail)
+                Write-Host ('Open this URL manually: ' + $existingUrl)
+              } else {
+                Show-LaunchFailure $detail $existingUrl
+              }
+            }
           }
           exit 0
         }
@@ -187,12 +318,17 @@ public sealed class RevealAtlasHost {
 
     private volatile bool _running = true;
     private volatile bool _everConnected = false;
+    private volatile bool _appLoaded = false;
     private volatile bool _byeReceived = false;
     private int _activeSessions = 0;
     private int _inFlightRequests = 0;
     private long _lastDisconnectUtcTicks = 0;
 
     public int Port { get { return _port; } }
+
+    // True as soon as a real browser window has loaded the app (the SSE session may
+    // still be connecting), which is what the launcher waits for.
+    public bool HasConnected { get { return _everConnected || _appLoaded; } }
 
     public static RevealAtlasHost Create(
         string token,
@@ -325,6 +461,10 @@ public sealed class RevealAtlasHost {
                 if (qIndex >= 0) {
                     path = rawTarget.Substring(0, qIndex);
                     query = rawTarget.Substring(qIndex + 1);
+                }
+
+                if (method == "GET" && (path == "/" || path == "/index.html")) {
+                    _appLoaded = true;
                 }
 
                 if (path == "/api/session" && method == "GET") {
@@ -798,9 +938,20 @@ public sealed class RevealAtlasHost {
   } catch {}
 
   $url = 'http://127.0.0.1:' + $port + '/'
-  Launch-AppWindow $url $dataDir
+  $launchDetail = Launch-AppWindow $url $dataDir $server
+  $startupWait = 120
+  if ($launchDetail) {
+    if ($env:RA_MODE -ieq '--debug') {
+      Write-Warning ('Unable to open the application window: ' + $launchDetail)
+      Write-Host ('Open this URL manually: ' + $url)
+    } else {
+      Show-LaunchFailure $launchDetail $url
+    }
+    # Keep serving for a while so the URL can still be opened by hand.
+    $startupWait = 900
+  }
 
-  $server.WaitUntilFinished(60)
+  $server.WaitUntilFinished($startupWait)
   $server.Stop()
 
   try {
