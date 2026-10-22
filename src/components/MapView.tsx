@@ -7,6 +7,14 @@ import type { ProjectImage } from '../lib/projects';
 
 export type Tool = 'reveal' | 'hide' | 'pan';
 
+export interface RemoteCursor {
+  id: string;
+  name: string;
+  color: string;
+  col: number;
+  row: number;
+}
+
 export interface MapViewProps {
   projectId: string;
   image: ProjectImage;
@@ -19,6 +27,10 @@ export interface MapViewProps {
   onStrokeStart: () => void;
   onStrokeEnd: () => void;
   onScaleChange?: (scale: number) => void;
+  /** Курсоры других игроков в онлайн-комнате. */
+  remoteCursors?: RemoteCursor[];
+  /** Сообщает наружу клетку под указателем — для онлайн-курсоров. */
+  onCursor?: (cell: { col: number; row: number }) => void;
 }
 
 export interface MapHandle {
@@ -81,6 +93,8 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
     onStrokeStart,
     onStrokeEnd,
     onScaleChange,
+    remoteCursors,
+    onCursor,
   } = props;
 
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -110,6 +124,7 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
     startCell: { col: number; row: number } | null;
   } | null>(null);
   const lastPointerTypeRef = useRef<string>('mouse');
+  const cursorCellRef = useRef<{ col: number; row: number } | null>(null);
 
   const fitScale = useMemo(() => {
     if (!viewport.w || !viewport.h) return 1;
@@ -171,6 +186,11 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // Смена мира — сбрасываем «последнюю сообщённую» клетку курсора.
+  useEffect(() => {
+    cursorCellRef.current = null;
+  }, [projectId]);
 
   // Вписываем мир при смене проекта и при первом известном размере окна.
   const fittedRef = useRef<string>('');
@@ -257,6 +277,14 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
     onStrokeStart();
   };
 
+  const reportCursor = (cell: { col: number; row: number } | null) => {
+    if (!onCursor || !cell) return;
+    const last = cursorCellRef.current;
+    if (last && last.col === cell.col && last.row === cell.row) return;
+    cursorCellRef.current = cell;
+    onCursor(cell);
+  };
+
   const paintAt = (px: number, py: number) => {
     const g = gestureRef.current;
     if (!g || g.mode !== 'paint') return;
@@ -265,6 +293,7 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
     if (g.lastCell && g.lastCell.col === cell.col && g.lastCell.row === cell.row) return;
     beginStroke();
     g.lastCell = cell;
+    reportCursor(cell);
     onPaint(stampCells(cell, brushSize), g.paintValue);
   };
 
@@ -342,7 +371,9 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
     const g = gestureRef.current;
 
     if (!g) {
-      setHover(cellFromScreen(point.x, point.y, true));
+      const cell = cellFromScreen(point.x, point.y, true);
+      setHover(cell);
+      reportCursor(cell);
       return;
     }
 
@@ -380,7 +411,9 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
       return;
     }
 
-    setHover(cellFromScreen(point.x, point.y, true));
+    const hoverCell = cellFromScreen(point.x, point.y, true);
+    setHover(hoverCell);
+    if (g.mode === 'paint') reportCursor(hoverCell);
 
     if (g.touch && !g.moved) {
       const dx = point.x - g.startPointer.x;
@@ -401,7 +434,9 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
     }
     if (g.mode === 'pinch' && pointersRef.current.size === 1) {
       // Палец остался один — продолжаем как панорамирование.
-      const point = localPoint(e.clientX, e.clientY);
+      // Стартуем от позиции именно оставшегося пальца, иначе карта «прыгает».
+      const remaining = [...pointersRef.current.entries()][0];
+      const point = remaining ? remaining[1] : localPoint(e.clientX, e.clientY);
       gestureRef.current = {
         mode: 'pan',
         paintValue: true,
@@ -425,7 +460,11 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
       setPainting(false);
     }
     if (g.mode === 'pan') setDragging(false);
-    if (pointersRef.current.size === 0) gestureRef.current = null;
+    if (pointersRef.current.size === 0) {
+      gestureRef.current = null;
+      setDragging(false);
+      setPainting(false);
+    }
   };
 
   // Отрисовка слоя тумана и сетки.
@@ -535,13 +574,42 @@ export const MapView = forwardRef<MapHandle, MapViewProps>(function MapView(prop
       ctx.strokeRect(x + 0.75, y + 0.75, wpx - 1.5, hpx - 1.5);
     }
 
+    // Курсоры других игроков (онлайн-комната).
+    if (remoteCursors && remoteCursors.length > 0) {
+      ctx.font = '600 11px Inter, system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'alphabetic';
+      for (const remote of remoteCursors) {
+        if (remote.col < 0 || remote.row < 0 || remote.col >= grid.cols || remote.row >= grid.rows) continue;
+        const x = tx + (grid.originX + remote.col * grid.tileW) * scale;
+        const y = ty + (grid.originY + remote.row * grid.tileH) * scale;
+        ctx.fillStyle = `${remote.color}33`;
+        ctx.fillRect(x, y, tileW, tileH);
+        ctx.strokeStyle = remote.color;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x + 1, y + 1, Math.max(1, tileW - 2), Math.max(1, tileH - 2));
+        if (tileW > 8) {
+          const label = remote.name.slice(0, 16) || 'Игрок';
+          const labelW = ctx.measureText(label).width + 10;
+          const labelY = y - 20 < 0 ? y + tileH + 2 : y - 20;
+          ctx.fillStyle = 'rgba(6, 10, 17, 0.86)';
+          ctx.fillRect(x, labelY, labelW, 17);
+          ctx.strokeStyle = `${remote.color}66`;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x + 0.5, labelY + 0.5, labelW - 1, 16);
+          ctx.fillStyle = remote.color;
+          ctx.fillText(label, x + 5, labelY + 12);
+        }
+      }
+    }
+
     ctx.restore();
 
     // Рамка мира.
     ctx.strokeStyle = 'rgba(126, 224, 195, 0.35)';
     ctx.lineWidth = 1;
     ctx.strokeRect(tx + 0.5, ty + 0.5, imgW - 1, imgH - 1);
-  }, [revealed, grid, view, viewport, hover, showGrid, tool, brushSize, dragging]);
+  }, [revealed, grid, view, viewport, hover, showGrid, tool, brushSize, dragging, remoteCursors]);
 
   const cursor =
     tool === 'pan' ? (dragging ? 'grabbing' : 'grab')

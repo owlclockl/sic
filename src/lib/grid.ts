@@ -34,7 +34,14 @@ export const MIN_TILE = 8;
 export const MAX_TILE = 512;
 export const MIN_COLUMNS = 4;
 export const MAX_COLUMNS = 200;
-export const MAX_ROWS = 512;
+/**
+ * Пределы вычисленной сетки. Раньше rows был ограничен 512, и на большой
+ * картинке с мелкой плиткой низ мира становился недоступен для открытия.
+ */
+export const MAX_GRID_COLS = 8192;
+export const MAX_GRID_ROWS = 8192;
+/** Страховка по памяти: маска не должна превращаться в сотни мегабайт. */
+export const MAX_GRID_CELLS = 4_000_000;
 
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
@@ -57,13 +64,29 @@ export function computeGrid(imageW: number, imageH: number, cfg: GridConfig): Gr
     tileW = clamp(Math.round(safeNumber(cfg.tileSize, 64)), MIN_TILE, MAX_TILE);
   }
   tileW = Math.max(1, tileW);
-  const tileH = tileW;
+  let tileH = tileW;
 
   const originX = ((safeNumber(cfg.offsetX, 0) % tileW) + tileW) % tileW;
   const originY = ((safeNumber(cfg.offsetY, 0) % tileH) + tileH) % tileH;
 
-  const cols = clamp(Math.ceil((w - originX) / tileW), 1, MAX_COLUMNS * 4);
-  const rows = clamp(Math.ceil((h - originY) / tileH), 1, MAX_ROWS);
+  // Сетка всегда покрывает картинку целиком, поэтому ни один участок мира
+  // не остаётся «за бортом» и недоступным для открытия.
+  let cols = Math.max(1, Math.ceil((w - originX) / tileW));
+  let rows = Math.max(1, Math.ceil((h - originY) / tileH));
+
+  // Если плитка получилась слишком мелкой для огромной картинки — укрупняем её,
+  // иначе маска открытых клеток съест всю память.
+  let guard = 0;
+  while (cols * rows > MAX_GRID_CELLS && guard < 40) {
+    tileW *= 2;
+    tileH = tileW;
+    guard += 1;
+    cols = Math.max(1, Math.ceil((w - originX) / tileW));
+    rows = Math.max(1, Math.ceil((h - originY) / tileH));
+  }
+
+  cols = Math.min(cols, MAX_GRID_COLS);
+  rows = Math.min(rows, MAX_GRID_ROWS);
 
   return { cols, rows, tileW, tileH, originX, originY, imageW: w, imageH: h };
 }

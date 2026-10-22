@@ -6,6 +6,8 @@ interface SidebarProps {
   projects: Project[];
   activeId: string | null;
   progressById: Record<string, number>;
+  /** id проекта, который является онлайн-комнатой. */
+  onlineRoomId?: string | null;
   onSelect: (id: string) => void;
   onNew: (file: File) => void;
   onImport: (file: File) => void;
@@ -18,6 +20,7 @@ export function Sidebar({
   projects,
   activeId,
   progressById,
+  onlineRoomId = null,
   onSelect,
   onNew,
   onImport,
@@ -94,7 +97,10 @@ export function Sidebar({
                   <span className="project-thumb-fill" style={{ height: `${Math.round(open * 100)}%` }} />
                 </div>
                 <div className="project-meta">
-                  <span className="project-name" title={project.name}>{project.name}</span>
+                  <span className="project-name" title={project.name}>
+                    {project.name}
+                    {project.id === onlineRoomId && <span className="project-online">ОНЛАЙН</span>}
+                  </span>
                   <span className="project-sub">
                     {project.image.width}×{project.image.height} · {Math.round(open * 100)}%
                   </span>

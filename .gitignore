@@ -6,3 +6,6 @@ dist-ssr/
 Thumbs.db
 .vite/
 npm-debug.log*
+
+# данные онлайн-сервера (комнаты и картинки миров)
+data/

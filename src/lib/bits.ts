@@ -81,6 +81,61 @@ export function remapRevealed(prev: Revealed, prevGrid: Grid, nextGrid: Grid): R
   return { cols: nextGrid.cols, rows: nextGrid.rows, bits };
 }
 
+/** Считает открытые клетки в base64-маске (без раскодирования в Uint8Array). */
+export function countBitsInEncoded(bits: string): number {
+  let open = 0;
+  for (let i = 0; i < bits.length; i++) {
+    const v = B64_LOOKUP[bits[i]];
+    if (v === undefined) continue;
+    open += v.toString(2).split('1').length - 1;
+  }
+  return open;
+}
+
+/** Применяет список изменений [col, row, value] к маске. */
+export function applyCells(rev: Revealed, cells: Array<[number, number, number]>): Revealed {
+  let bits: Uint8Array | null = null;
+  for (const [col, row, value] of cells) {
+    if (!Number.isInteger(col) || !Number.isInteger(row)) continue;
+    if (col < 0 || row < 0 || col >= rev.cols || row >= rev.rows) continue;
+    const idx = row * rev.cols + col;
+    const next = value ? 1 : 0;
+    if (rev.bits[idx] === next) continue;
+    if (!bits) bits = rev.bits.slice();
+    bits[idx] = next;
+  }
+  return bits ? { cols: rev.cols, rows: rev.rows, bits } : rev;
+}
+
+/** То же, но для сохранённой (base64) маски проекта. */
+export function applyCellsToEncoded(
+  encoded: { cols: number; rows: number; bits: string },
+  cells: Array<[number, number, number]>,
+): { cols: number; rows: number; bits: string } {
+  const bits = decodeBits(encoded.bits, encoded.cols * encoded.rows);
+  let changed = false;
+  for (const [col, row, value] of cells) {
+    if (!Number.isInteger(col) || !Number.isInteger(row)) continue;
+    if (col < 0 || row < 0 || col >= encoded.cols || row >= encoded.rows) continue;
+    const idx = row * encoded.cols + col;
+    const next = value ? 1 : 0;
+    if (bits[idx] === next) continue;
+    bits[idx] = next;
+    changed = true;
+  }
+  return changed ? { cols: encoded.cols, rows: encoded.rows, bits: encodeBits(bits) } : encoded;
+}
+
+/** Заполняет сохранённую маску одним значением («открыть всё» / «скрыть всё»). */
+export function fillEncoded(
+  encoded: { cols: number; rows: number; bits: string },
+  value: boolean,
+): { cols: number; rows: number; bits: string } {
+  const bits = new Uint8Array(Math.max(0, encoded.cols * encoded.rows));
+  if (value) bits.fill(1);
+  return { cols: encoded.cols, rows: encoded.rows, bits: encodeBits(bits) };
+}
+
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
 const B64_LOOKUP: Record<string, number> = (() => {
