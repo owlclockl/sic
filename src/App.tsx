@@ -13,16 +13,21 @@ import { countRevealed, emptyRevealed, remapRevealed, resizeRevealed, type Revea
 import {
   createProject,
   downloadJson,
-  loadState,
   newId,
   normalizeProject,
   projectRevealed,
-  saveState,
   serializeRevealed,
   type Project,
   type ProjectImage,
 } from './lib/projects';
-import { readImage, shrinkImage } from './lib/image';
+import {
+  createDesktopShortcut,
+  getInitialStoredState,
+  openDesktopDataFolder,
+  persistState,
+  registerFlushProvider,
+} from './lib/storage';
+import { readImage, recommendedMaxSide, shrinkImage } from './lib/image';
 import { createDemoWorld } from './lib/demoWorld';
 
 type Toast = { kind: 'info' | 'error'; text: string } | null;
@@ -45,7 +50,7 @@ function demoImage(): ProjectImage {
 }
 
 function initialState(): { projects: Project[]; activeId: string | null } {
-  const stored = loadState();
+  const stored = getInitialStoredState();
   if (stored && stored.projects.length > 0) {
     return { projects: stored.projects, activeId: stored.activeId ?? stored.projects[0].id };
   }
@@ -103,8 +108,48 @@ export default function App() {
   const revealedCount = useMemo(() => countRevealed(revealed), [revealed]);
   const progress = totalCells > 0 ? Math.min(1, revealedCount / totalCells) : 0;
 
-  const latestRef = useRef({ activeId, gridConfig, brushSize, revealed });
-  latestRef.current = { activeId, gridConfig, brushSize, revealed };
+  const latestRef = useRef({ activeId, gridConfig, brushSize, revealed, projects });
+  latestRef.current = { activeId, gridConfig, brushSize, revealed, projects };
+  const dragDepthRef = useRef(0);
+
+  useEffect(() => {
+    document.title = activeProject ? `${activeProject.name} — Reveal Atlas` : 'Reveal Atlas';
+  }, [activeProject]);
+
+  useEffect(() => {
+    registerFlushProvider(() => {
+      const { activeId: id, gridConfig: cfg, brushSize: brush, revealed: rev, projects: list } = latestRef.current;
+      const merged = id
+        ? list.map((p) =>
+            p.id === id
+              ? {
+                  ...p,
+                  grid: cfg,
+                  brushSize: brush,
+                  revealed: serializeRevealed(rev.cols, rev.rows, rev.bits),
+                  updatedAt: Date.now(),
+                }
+              : p,
+          )
+        : list;
+      return { version: 1, activeId: id, projects: merged };
+    });
+    return () => registerFlushProvider(null);
+  }, []);
+
+  useEffect(() => {
+    const preventFileNav = (e: DragEvent) => {
+      if (e.dataTransfer?.types?.includes('Files')) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('dragover', preventFileNav);
+    window.addEventListener('drop', preventFileNav);
+    return () => {
+      window.removeEventListener('dragover', preventFileNav);
+      window.removeEventListener('drop', preventFileNav);
+    };
+  }, []);
 
   const showToast = useCallback((kind: 'info' | 'error', text: string) => {
     setToast({ kind, text });
@@ -171,11 +216,17 @@ export default function App() {
 
   const quotaWarned = useRef(false);
   useEffect(() => {
-    const result = saveState({ version: 1, activeId, projects });
-    if (result === 'quota' && !quotaWarned.current) {
-      quotaWarned.current = true;
-      showToast('error', 'Браузер не даёт сохранить столько данных (лимит хранилища). Экспортируйте проект в JSON.');
-    }
+    let cancelled = false;
+    void persistState({ version: 1, activeId, projects }).then((result) => {
+      if (cancelled) return;
+      if (result === 'quota' && !quotaWarned.current) {
+        quotaWarned.current = true;
+        showToast('error', 'Не хватает места в хранилище браузера. Экспортируйте проект в JSON или запустите RevealAtlas.cmd.');
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [projects, activeId, showToast]);
 
   const commitActive = useCallback(() => {
@@ -295,7 +346,7 @@ export default function App() {
       setBusy(true);
       try {
         const loaded = await readImage(file);
-        const small = await shrinkImage(loaded, 4096, 0.86);
+        const small = await shrinkImage(loaded, recommendedMaxSide(), 0.88);
         const project = createProject(small.name || 'Новый мир', {
           name: small.name,
           width: small.width,
@@ -324,7 +375,7 @@ export default function App() {
       setBusy(true);
       try {
         const loaded = await readImage(file);
-        const small = await shrinkImage(loaded, 4096, 0.86);
+        const small = await shrinkImage(loaded, recommendedMaxSide(), 0.88);
         const nextGrid = computeGrid(small.width, small.height, gridConfig);
         setProjects((prev) =>
           prev.map((p) =>
@@ -425,6 +476,7 @@ export default function App() {
   const handleDrop = useCallback(
     (e: ReactDragEvent) => {
       e.preventDefault();
+      dragDepthRef.current = 0;
       setDragOver(false);
       const file = e.dataTransfer.files?.[0];
       if (!file) return;
@@ -436,6 +488,20 @@ export default function App() {
     },
     [addProject, importProject],
   );
+
+  const handleOpenDataFolder = useCallback(async () => {
+    const ok = await openDesktopDataFolder();
+    if (!ok) showToast('error', 'Не удалось открыть папку сохранений.');
+  }, [showToast]);
+
+  const handleCreateShortcut = useCallback(async () => {
+    const res = await createDesktopShortcut();
+    if (res.ok) {
+      showToast('info', 'Ярлык «Reveal Atlas» создан на Рабочем столе.');
+    } else {
+      showToast('error', 'Не удалось создать ярлык на Рабочем столе.');
+    }
+  }, [showToast]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -492,7 +558,25 @@ export default function App() {
         : 'Тяните, чтобы перемещаться по карте.';
 
   return (
-    <div className="app">
+    <div
+      className="app"
+      onDragEnter={(e) => {
+        if (!e.dataTransfer?.types?.includes('Files')) return;
+        e.preventDefault();
+        dragDepthRef.current += 1;
+        setDragOver(true);
+      }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer?.types?.includes('Files')) return;
+        e.preventDefault();
+      }}
+      onDragLeave={(e) => {
+        if (!e.dataTransfer?.types?.includes('Files')) return;
+        dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+        if (dragDepthRef.current === 0) setDragOver(false);
+      }}
+      onDrop={handleDrop}
+    >
       <header className="topbar">
         <button
           className="icon-btn mobile-only"
@@ -617,12 +701,6 @@ export default function App() {
               setSettingsOpen(false);
             }
           }}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDragOver(true);
-          }}
-          onDragLeave={() => setDragOver(false)}
-          onDrop={handleDrop}
         >
           <MapView
             ref={mapRef}
@@ -689,6 +767,8 @@ export default function App() {
               onDelete={() => {
                 if (confirm(`Удалить «${activeProject.name}»? Прогресс будет потерян.`)) deleteProject(activeProject.id);
               }}
+              onOpenDataFolder={handleOpenDataFolder}
+              onCreateShortcut={handleCreateShortcut}
               onClose={() => setSettingsOpen(false)}
             />
           )}

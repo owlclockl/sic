@@ -1,3 +1,5 @@
+import { isDesktopApp } from './storage';
+
 export interface LoadedImage {
   dataUrl: string;
   width: number;
@@ -6,8 +8,15 @@ export interface LoadedImage {
   type: string;
 }
 
-export const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 export const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/avif', 'image/gif', 'image/bmp'];
+
+export function recommendedMaxSide(): number {
+  if (typeof window !== 'undefined' && window.innerWidth <= 980 && !isDesktopApp()) {
+    return 4096;
+  }
+  return isDesktopApp() ? 8192 : 6144;
+}
 
 export function isSupportedImage(file: File): boolean {
   if (file.type.startsWith('image/')) return true;
@@ -49,10 +58,10 @@ export function readImage(file: File): Promise<LoadedImage> {
 }
 
 /**
- * Если картинка слишком большая для localStorage — пересобираем её в JPEG
+ * Если картинка превышает разумный размер текстуры холста — пересобираем её в JPEG
  * с ограничением по длинной стороне.
  */
-export function shrinkImage(image: LoadedImage, maxSide = 4096, quality = 0.85): Promise<LoadedImage> {
+export function shrinkImage(image: LoadedImage, maxSide = recommendedMaxSide(), quality = 0.88): Promise<LoadedImage> {
   return new Promise((resolve) => {
     const longest = Math.max(image.width, image.height);
     if (longest <= maxSide) {
