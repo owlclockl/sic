@@ -8,6 +8,7 @@ import {
   type GridConfig,
 } from '../lib/grid';
 import type { Project } from '../lib/projects';
+import { isDesktopApp } from '../lib/storage';
 
 interface SettingsPanelProps {
   project: Project;
@@ -22,6 +23,8 @@ interface SettingsPanelProps {
   onHideAll: () => void;
   onExport: () => void;
   onDelete: () => void;
+  onOpenDataFolder?: () => void;
+  onCreateShortcut?: () => void;
   onClose: () => void;
 }
 
@@ -45,6 +48,8 @@ export function SettingsPanel({
   onHideAll,
   onExport,
   onDelete,
+  onOpenDataFolder,
+  onCreateShortcut,
   onClose,
 }: SettingsPanelProps) {
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -262,6 +267,25 @@ export function SettingsPanel({
           Замена картинки сбрасывает прогресс, но сохраняет размер сетки.
         </p>
       </section>
+
+      {isDesktopApp() && (
+        <section className="settings-section">
+          <div className="section-title">Программа на ПК</div>
+          {onOpenDataFolder && (
+            <button className="btn btn-ghost btn-block" onClick={onOpenDataFolder}>
+              Открыть папку сохранений
+            </button>
+          )}
+          {onCreateShortcut && (
+            <button className="btn btn-ghost btn-block" onClick={onCreateShortcut}>
+              Создать ярлык на Рабочем столе
+            </button>
+          )}
+          <p className="hint">
+            Миры и прогресс автоматически сохраняются на диске ПК без ограничения браузера в 5 МБ.
+          </p>
+        </section>
+      )}
     </aside>
   );
 }

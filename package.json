@@ -6,7 +6,8 @@
   "description": "Reveal Atlas — интерактивная карта мира, которая открывается по клеткам",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && node scripts/build-single-file.mjs",
+    "build:single": "tsc --noEmit && vite build && node scripts/build-single-file.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },

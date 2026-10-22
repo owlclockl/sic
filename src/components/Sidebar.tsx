@@ -1,5 +1,6 @@
 import { useRef } from 'react';
 import type { Project } from '../lib/projects';
+import { isDesktopApp } from '../lib/storage';
 
 interface SidebarProps {
   projects: Project[];
@@ -128,7 +129,7 @@ export function Sidebar({
       </ul>
 
       <div className="sidebar-foot">
-        <span>Всё хранится локально в браузере</span>
+        <span>{isDesktopApp() ? 'Локальная программа · автосохранение на ПК' : 'Всё хранится локально на устройстве'}</span>
       </div>
     </aside>
   );
