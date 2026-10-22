@@ -16,3 +16,13 @@ data/
 
 # QR-код доступа с телефона (зависит от песочницы)
 phone-access.png
+
+# Android: кеш и результаты сборки (сам проект нужен — по нему собирается APK)
+android/app/src/main/assets/public/
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+android/.idea/
+android/captures/
+*.apk

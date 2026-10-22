@@ -8,132 +8,7 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 const DIST_DIR = path.join(ROOT_DIR, 'dist');
 const OUTPUT_CMD = path.join(ROOT_DIR, 'RevealAtlas.cmd');
 
-// --- CRC32 & Minimal PNG / ICO Encoder (zero external dependencies) ---
-
-const CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) {
-      c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
-    }
-    table[n] = c >>> 0;
-  }
-  return table;
-})();
-
-function crc32(buf) {
-  let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) {
-    c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
-  }
-  return (c ^ 0xffffffff) >>> 0;
-}
-
-function pngChunk(type, data) {
-  const typeBuf = Buffer.from(type, 'ascii');
-  const lenBuf = Buffer.alloc(4);
-  lenBuf.writeUInt32BE(data.length, 0);
-  const crcInput = Buffer.concat([typeBuf, data]);
-  const crcBuf = Buffer.alloc(4);
-  crcBuf.writeUInt32BE(crc32(crcInput), 0);
-  return Buffer.concat([lenBuf, typeBuf, data, crcBuf]);
-}
-
-function encodeRgbaPng(width, height, rgba) {
-  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(width, 0);
-  ihdr.writeUInt32BE(height, 4);
-  ihdr[8] = 8; // 8 bits per channel
-  ihdr[9] = 6; // RGBA
-  ihdr[10] = 0;
-  ihdr[11] = 0;
-  ihdr[12] = 0;
-
-  const stride = width * 4;
-  const raw = Buffer.alloc((stride + 1) * height);
-  for (let y = 0; y < height; y++) {
-    const rowOffset = y * (stride + 1);
-    raw[rowOffset] = 0; // Filter type 0 (None)
-    rgba.copy(raw, rowOffset + 1, y * stride, (y + 1) * stride);
-  }
-
-  const compressed = zlib.deflateSync(raw, { level: 9 });
-  return Buffer.concat([
-    signature,
-    pngChunk('IHDR', ihdr),
-    pngChunk('IDAT', compressed),
-    pngChunk('IEND', Buffer.alloc(0)),
-  ]);
-}
-
-function insideRoundedRect(px, py, x, y, w, h, r) {
-  if (px < x || px > x + w || py < y || py > y + h) return false;
-  const cx = Math.max(x + r, Math.min(x + w - r, px));
-  const cy = Math.max(y + r, Math.min(y + h - r, py));
-  const dx = px - cx;
-  const dy = py - cy;
-  return dx * dx + dy * dy <= r * r;
-}
-
-/**
- * Рисует фирменную иконку Reveal Atlas в координатах 32x32 с 4x4 суперсэмплингом.
- */
-function renderAppIconPng(size) {
-  const rgba = Buffer.alloc(size * size * 4);
-  const bg = [11, 18, 32];       // #0b1220
-  const teal = [126, 224, 195];  // #7ee0c3
-  const slate = [42, 58, 82];    // #2a3a52
-  const samples = 4;
-  const totalSamples = samples * samples;
-
-  for (let py = 0; py < size; py++) {
-    for (let px = 0; px < size; px++) {
-      let rSum = 0;
-      let gSum = 0;
-      let bSum = 0;
-      let aSum = 0;
-
-      for (let sy = 0; sy < samples; sy++) {
-        const uy = ((py + (sy + 0.5) / samples) / size) * 32;
-        for (let sx = 0; sx < samples; sx++) {
-          const ux = ((px + (sx + 0.5) / samples) / size) * 32;
-          if (!insideRoundedRect(ux, uy, 0.5, 0.5, 31, 31, 7.5)) continue;
-
-          let color = bg;
-          if (
-            insideRoundedRect(ux, uy, 6, 6, 9, 9, 1.6) ||
-            insideRoundedRect(ux, uy, 17, 17, 9, 9, 1.6)
-          ) {
-            color = teal;
-          } else if (
-            insideRoundedRect(ux, uy, 17, 6, 9, 9, 1.6) ||
-            insideRoundedRect(ux, uy, 6, 17, 9, 9, 1.6)
-          ) {
-            color = slate;
-          }
-
-          rSum += color[0];
-          gSum += color[1];
-          bSum += color[2];
-          aSum += 255;
-        }
-      }
-
-      const idx = (py * size + px) * 4;
-      if (aSum > 0) {
-        const hits = aSum / 255;
-        rgba[idx] = Math.round(rSum / hits);
-        rgba[idx + 1] = Math.round(gSum / hits);
-        rgba[idx + 2] = Math.round(bSum / hits);
-        rgba[idx + 3] = Math.round(aSum / totalSamples);
-      }
-    }
-  }
-
-  return encodeRgbaPng(size, size, rgba);
-}
+import { renderAppIconPng, crc32, pngChunk, encodeRgbaPng } from './lib/app-icon.mjs';
 
 function buildIcoFromPngs(entries) {
   const count = entries.length;
@@ -192,9 +67,9 @@ function buildSelfContainedHtml() {
     return '';
   });
 
+  // favicon и manifest уже подключены в index.html, здесь только инлайн-CSS.
   const extraHeadLinks = [
     '<link rel="icon" href="/favicon.ico" sizes="any" />',
-    '<link rel="manifest" href="/manifest.webmanifest" />',
     ...cssBlocks,
   ].join('\n    ');
 

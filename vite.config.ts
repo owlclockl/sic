@@ -22,6 +22,9 @@ function onlineMode(): Plugin {
 
 export default defineConfig({
   plugins: [react(), onlineMode()],
+  // Относительные пути к ассетам: сборка работает и на сервере, и в WebView
+  // (Android/Capacitor открывает её с https://localhost, а не с корня домена).
+  base: './',
   server: {
     host: '0.0.0.0',
     port: 5173,

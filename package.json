@@ -15,16 +15,22 @@
     "online:tunnel": "node scripts/online-tunnel.mjs",
     "phone": "node scripts/phone-access.mjs",
     "cloudflared": "node scripts/install-cloudflared.mjs",
+    "icons": "node scripts/build-app-icons.mjs",
+    "android:sync": "npm run build && node scripts/build-app-icons.mjs && cap sync android",
+    "android:apk": "npm run android:sync && cd android && ./gradlew assembleDebug",
     "test:online": "node scripts/online-selftest.mjs && node scripts/online-client-selftest.mjs",
     "test:online:server": "node scripts/online-selftest.mjs",
     "test:online:client": "node scripts/online-client-selftest.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@capacitor/android": "^6.2.2",
+    "@capacitor/core": "^6.2.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "^6.2.2",
     "@types/node": "^22.20.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

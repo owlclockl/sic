@@ -168,10 +168,24 @@ export function serverWebSocketUrl(raw: string): string {
   return base.replace(/^http/i, 'ws').replace(/\/+$/, '') + '/ws';
 }
 
-/** Адрес сервера по умолчанию — тот же origin, с которым открыто приложение. */
+/**
+ * Адрес сервера, вшитый в сборку (VITE_SERVER_URL). Нужен там, где origin
+ * приложения не является сервером — например, в Android-приложении, которое
+ * открыто с https://localhost.
+ */
+function builtInServerUrl(): string {
+  try {
+    const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
+    return normalizeServerUrl(env?.VITE_SERVER_URL ?? '');
+  } catch {
+    return '';
+  }
+}
+
+/** Адрес сервера по умолчанию: вшитый в сборку, иначе origin приложения. */
 export function defaultServerUrl(): string {
   if (typeof window === 'undefined') return '';
-  return normalizeServerUrl(window.location.origin);
+  return builtInServerUrl() || normalizeServerUrl(window.location.origin);
 }
 
 export interface CreateRoomPayload {
